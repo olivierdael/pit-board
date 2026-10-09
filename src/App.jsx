@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from "react";
 import { supabase } from "./lib/supabase";
+import { fetchLiveTiming, parseLiveTiming, normalizeCarNumber } from "./lib/risLive";
 import {
   Flag,
   Plus,
@@ -685,8 +686,19 @@ export default function PitBoard() {
     idleConsoLh: 3, // consommation au ralenti (L/h) pendant que la voiture est à l'arrêt au stand (0 km/h)
     circuitName: "",
     circuitLengthKm: 0,
+    liveEnabled: false, // flux RIS Live Timing (classement, tours) relayé par un poste Admin
+    liveUuid: "", // uuid du flux RIS (change à chaque événement)
+    liveFlagAuto: false, // drapeaux vert/jaune pilotés par le flux (le rouge reste manuel)
   });
   const [showSettings, setShowSettings] = useState(false);
+  // dernier flux reçu via Supabase (écrit par le poste Admin relais) et état du relais local
+  const [liveRow, setLiveRow] = useState(null); // { seq, generatedAt, fetchedAt, uuid, status, trackStateRaw, cars }
+  const [relayStatus, setRelayStatus] = useState(null); // seulement sur le poste Admin qui relaie
+  const pushFlagRef = useRef(null);
+  const lastFeedFlagRef = useRef(null);
+  const lastSeenFlagRef = useRef(null);
+  const autoPushedFlagRef = useRef(null);
+  const manualOverrideRef = useRef(null);
   const [advancedMode, setAdvancedMode] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
@@ -747,6 +759,36 @@ export default function PitBoard() {
     () => cars.filter((c) => c.numero.trim() !== ""),
     [cars]
   );
+
+  // flux live (RIS) tel que reçu par cet écran. Le classement et les tours sont utilisés
+  // tant que le relais Admin est vivant ; si le flux lui-même n'évolue plus (feedFresh = false),
+  // les valeurs restent affichées mais un avertissement apparaît dans l'en-tête.
+  const liveInfo = useMemo(() => {
+    if (!settings.liveEnabled || !liveRow || !liveRow.cars) return null;
+    if ((liveRow.uuid || "") !== (settings.liveUuid || "").trim()) return null; // flux d'un autre événement
+    const relayAgeSec = Math.max(0, Math.round((now - liveRow.fetchedAt) / 1000));
+    const feedAgeSec = Math.max(0, Math.round((liveRow.fetchedAt - liveRow.generatedAt) / 1000));
+    return {
+      cars: liveRow.cars,
+      relayAlive: relayAgeSec <= 25,
+      relayAgeSec,
+      feedFresh: feedAgeSec <= 90 && liveRow.status !== "FINISHED",
+      feedAgeSec,
+      status: liveRow.status || "",
+      trackStateRaw: liveRow.trackStateRaw,
+    };
+  }, [settings.liveEnabled, settings.liveUuid, liveRow, now]);
+
+  // données live d'une voiture (null si pas de flux, relais arrêté ou voiture absente du flux)
+  function liveFor(car) {
+    if (!liveInfo || !liveInfo.relayAlive) return null;
+    return liveInfo.cars[normalizeCarNumber(car.numero)] || null;
+  }
+  // classement affiché : celui du flux s'il existe, sinon le classement saisi à la main
+  function rankOf(car) {
+    const l = liveFor(car);
+    return (l && l.pos) || car.classement || 0;
+  }
 
   // diagnostic automatique minimal : détecte les incohérences de données courantes
   const diagnostics = useMemo(() => {
@@ -1057,6 +1099,147 @@ export default function PitBoard() {
     };
   }, []);
 
+  // --- FLUX LIVE : lecture partagée (tous les postes) ---
+  // canal séparé du canal principal : si la table live_timing n'existe pas encore, le reste
+  // de l'application n'est pas affecté.
+  useEffect(() => {
+    let cancelled = false;
+    const rowToLive = (row) => (row && row.data && row.data.cars ? row.data : null);
+
+    async function loadLive() {
+      try {
+        const { data } = await supabase.from("live_timing").select("*").eq("id", 1).maybeSingle();
+        if (!cancelled) setLiveRow(rowToLive(data));
+      } catch (e) {}
+    }
+    loadLive();
+
+    const liveChannel = supabase
+      .channel("pitboard-live")
+      .on("postgres_changes", { event: "*", schema: "public", table: "live_timing" }, (payload) => {
+        if (payload.eventType === "DELETE") setLiveRow(null);
+        else setLiveRow(rowToLive(payload.new));
+      })
+      .subscribe();
+
+    const onOnline = () => loadLive();
+    window.addEventListener("online", onOnline);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("online", onOnline);
+      supabase.removeChannel(liveChannel);
+    };
+  }, []);
+
+  // --- FLUX LIVE : relais (poste Admin uniquement) ---
+  // Un seul poste lit le flux RIS toutes les 3 s et l'écrit dans Supabase ; les autres le
+  // reçoivent par Realtime. Les drapeaux vert/jaune sont appliqués ici si l'option est active.
+  useEffect(() => {
+    const uuid = (settings.liveUuid || "").trim();
+    // on ne démarre que sur un uuid complet : pendant la saisie, aucune requête partielle n'est envoyée
+    if (!isAdmin || !settings.liveEnabled || !/^[0-9a-fA-F-]{36}$/.test(uuid)) {
+      setRelayStatus(null);
+      return;
+    }
+    let stopped = false;
+    let busy = false;
+    let lastSeq = null;
+    let lastWriteAt = 0;
+
+    function applyAutoFlag(live, nowMs) {
+      const cur = lastKnownFlagRef.current;
+
+      // changement de drapeau fait par quelqu'un d'autre que le relais (n'importe quel poste) :
+      // c'est une commande manuelle, elle reste prioritaire tant que le flux ne change pas lui-même
+      if (lastSeenFlagRef.current === null) {
+        lastSeenFlagRef.current = cur;
+      } else if (cur !== lastSeenFlagRef.current) {
+        if (cur !== autoPushedFlagRef.current) {
+          manualOverrideRef.current = { feedFlag: lastFeedFlagRef.current };
+        }
+        lastSeenFlagRef.current = cur;
+      }
+      lastFeedFlagRef.current = live.flag;
+
+      if (!settingsRef.current.liveFlagAuto) return;
+      if (!live.flag) return; // rouge, safety car, statut vide... : pas de changement automatique
+      if (live.status === "FINISHED") return;
+      if (nowMs - live.generatedAt > 90000) return; // flux ancien : on ne touche pas au drapeau
+      const ov = manualOverrideRef.current;
+      if (ov) {
+        if (ov.feedFlag === live.flag) return;
+        manualOverrideRef.current = null;
+      }
+      if (cur === "rouge") return; // le rouge se lève à la main
+      if (cur === live.flag) return;
+      autoPushedFlagRef.current = live.flag;
+      lastSeenFlagRef.current = live.flag;
+      if (pushFlagRef.current) pushFlagRef.current(live.flag);
+    }
+
+    async function tick() {
+      if (busy || stopped) return;
+      busy = true;
+      try {
+        const { raw, via } = await fetchLiveTiming(uuid);
+        if (stopped) return;
+        const live = parseLiveTiming(raw);
+        const nowMs = Date.now();
+        let writeError = "";
+        if (live.seq !== lastSeq || nowMs - lastWriteAt >= 10000) {
+          const payload = {
+            uuid,
+            seq: live.seq,
+            generatedAt: live.generatedAt,
+            fetchedAt: nowMs,
+            status: live.status,
+            trackStateRaw: live.trackStateRaw,
+            cars: live.cars,
+          };
+          const { error } = await supabase
+            .from("live_timing")
+            .upsert({ id: 1, data: payload, updated_at: new Date(nowMs).toISOString() });
+          if (error) writeError = error.message || "écriture Supabase refusée";
+          else {
+            lastSeq = live.seq;
+            lastWriteAt = nowMs;
+          }
+        }
+        applyAutoFlag(live, nowMs);
+        if (!stopped) {
+          setRelayStatus({
+            ok: !writeError,
+            error: writeError ? `Supabase : ${writeError} (la table live_timing existe-t-elle ?)` : "",
+            via,
+            at: nowMs,
+            generatedAt: live.generatedAt,
+            nCars: Object.keys(live.cars).length,
+            trackStateRaw: live.trackStateRaw,
+            status: live.status,
+          });
+        }
+      } catch (e) {
+        if (!stopped) {
+          setRelayStatus({ ok: false, error: (e && e.message) || String(e), at: Date.now() });
+        }
+      } finally {
+        busy = false;
+      }
+    }
+
+    tick();
+    const timer = setInterval(tick, 3000);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [isAdmin, settings.liveEnabled, settings.liveUuid]);
+
+  // quand on (dés)active les drapeaux auto, on repart de zéro : plus de commande manuelle en attente
+  useEffect(() => {
+    manualOverrideRef.current = null;
+  }, [settings.liveFlagAuto, settings.liveUuid]);
+
   // -- helpers de mappage app -> lignes Supabase --
   function carToRow(c) {
     return {
@@ -1327,7 +1510,7 @@ export default function PitBoard() {
           car.numero,
           car.team || "",
           car.pilote || "",
-          car.classement || "",
+          rankOf(car) || "",
           "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
         ]);
         return;
@@ -1338,7 +1521,7 @@ export default function PitBoard() {
           car.numero,
           car.team || "",
           car.pilote || "",
-          car.classement || "",
+          rankOf(car) || "",
           r.n,
           fmtTimeHMS(r.durationSec),
           r.laps || "",
@@ -1747,6 +1930,9 @@ export default function PitBoard() {
         .eq("id", 1);
     } catch (e) {}
   }
+  // le relais live tourne dans une minuterie créée une seule fois : il doit toujours appeler
+  // la version la plus récente de pushFlag (état `flag` et `calls` à jour)
+  pushFlagRef.current = pushFlag;
 
   const theme = FLAGS[flag];
   const bgStyle =
@@ -1771,9 +1957,16 @@ export default function PitBoard() {
       else idle.push({ car, call: null });
     });
     withCall.sort((a, b) => sortKey(a.call, now) - sortKey(b.call, now));
-    idle.sort((a, b) => (a.car.classement || a.car.id) - (b.car.classement || b.car.id));
+    // classement du flux live si disponible ; les voitures absentes du flux passent après
+    const liveActive = !!(liveInfo && liveInfo.relayAlive);
+    const sortKeyIdle = (car) => {
+      const l = liveFor(car);
+      if (l && l.pos) return l.pos;
+      return (liveActive ? 1000 : 0) + (car.classement || car.id);
+    };
+    idle.sort((a, b) => sortKeyIdle(a.car) - sortKeyIdle(b.car));
     return [...withCall, ...idle];
-  }, [configuredCars, calls, now]);
+  }, [configuredCars, calls, now, liveInfo]);
 
   // animation FLIP : quand l'ordre des encarts change (ex. après "voiture quitte les
   // stands"), on les fait glisser lentement (~2,5s) vers leur nouvelle position au lieu
@@ -2133,6 +2326,32 @@ export default function PitBoard() {
               {connectionStatus === "reconnecting" && <>🟠 Reconnexion</>}
               {connectionStatus === "offline" && <>🔴 Hors ligne</>}
             </div>
+            {settings.liveEnabled && (
+              <div
+                className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide bg-black/20 text-black"
+                title={
+                  !liveInfo
+                    ? "Aucune donnée reçue pour cet uuid. Un poste Admin doit être ouvert pour relayer le flux."
+                    : !liveInfo.relayAlive
+                    ? `Le poste Admin qui relaie le flux n'a rien envoyé depuis ${liveInfo.relayAgeSec} s : classement et tours ne sont plus mis à jour (classement manuel utilisé).`
+                    : liveInfo.status === "FINISHED"
+                    ? "Session terminée côté chronométrage."
+                    : !liveInfo.feedFresh
+                    ? `Le flux RIS n'évolue plus (dernière donnée il y a ${liveInfo.feedAgeSec} s).`
+                    : "Flux RIS à jour."
+                }
+              >
+                {!liveInfo && <>⚪ Live : en attente</>}
+                {liveInfo && !liveInfo.relayAlive && <>🟠 Live : relais arrêté</>}
+                {liveInfo && liveInfo.relayAlive && liveInfo.status === "FINISHED" && <>🏁 Live : terminé</>}
+                {liveInfo && liveInfo.relayAlive && liveInfo.status !== "FINISHED" && !liveInfo.feedFresh && (
+                  <>🟠 Live : flux figé</>
+                )}
+                {liveInfo && liveInfo.relayAlive && liveInfo.status !== "FINISHED" && liveInfo.feedFresh && (
+                  <>🟢 Live{settings.liveFlagAuto ? " · drapeaux auto" : ""}</>
+                )}
+              </div>
+            )}
             <button
               onClick={() => {
                 try {
@@ -2343,6 +2562,71 @@ export default function PitBoard() {
                     className="px-2 py-1.5 text-sm rounded bg-black/50 text-white border border-white/20 focus:outline-none focus:border-white"
                   />
                 </label>
+              </div>
+              {/* CHRONOMÉTRAGE LIVE (RIS) */}
+              <div className="flex flex-col gap-2 p-2 rounded border border-white/15 bg-black/30">
+                <div className="text-white text-xs font-bold uppercase tracking-wide">
+                  Chronométrage live (RIS)
+                </div>
+                <label className="flex items-center gap-2 text-white text-xs">
+                  <input
+                    type="checkbox"
+                    checked={!!settings.liveEnabled}
+                    disabled={!canEdit}
+                    onChange={(e) => pushSettings({ ...settings, liveEnabled: e.target.checked })}
+                  />
+                  Utiliser le flux live (classement général et tours dans les encarts)
+                </label>
+                <label className="flex flex-col gap-1 text-white text-xs">
+                  uuid du flux
+                  <input
+                    type="text"
+                    value={settings.liveUuid || ""}
+                    disabled={!canEdit}
+                    placeholder="00000000-0000-0000-0000-000000000004"
+                    onChange={(e) => pushSettings({ ...settings, liveUuid: e.target.value.trim() })}
+                    className="px-2 py-1.5 text-sm font-mono rounded bg-black/50 text-white placeholder-white/30 border border-white/20 focus:outline-none focus:border-white"
+                  />
+                </label>
+                <label className="flex items-center gap-2 text-white text-xs">
+                  <input
+                    type="checkbox"
+                    checked={!!settings.liveFlagAuto}
+                    disabled={!canEdit}
+                    onChange={(e) => pushSettings({ ...settings, liveFlagAuto: e.target.checked })}
+                  />
+                  Drapeaux automatiques (vert / jaune)
+                </label>
+                <p className="text-white/50 text-[10px]">
+                  Un poste Admin doit rester ouvert : il lit le flux toutes les 3 s et le partage aux autres
+                  postes. Le rouge reste manuel. Un drapeau changé à la main reste prioritaire jusqu'à ce que
+                  le flux change lui-même.
+                </p>
+                {isAdmin && settings.liveEnabled && (
+                  <div className="text-[10px] font-mono">
+                    {!relayStatus && <span className="text-white/60">Relais : démarrage…</span>}
+                    {relayStatus && relayStatus.ok && (
+                      <span className="text-green-400">
+                        Relais OK ({relayStatus.via === "proxy" ? "via relais Vercel" : "lecture directe"}) —{" "}
+                        {relayStatus.nCars} voitures · statut {relayStatus.status || "?"} · piste{" "}
+                        {relayStatus.trackStateRaw || "(vide)"} · dernière donnée il y a{" "}
+                        {Math.max(0, Math.round((now - relayStatus.generatedAt) / 1000))} s
+                      </span>
+                    )}
+                    {relayStatus && !relayStatus.ok && (
+                      <span className="text-red-400">Relais en erreur : {relayStatus.error}</span>
+                    )}
+                  </div>
+                )}
+                {!isAdmin && settings.liveEnabled && (
+                  <div className="text-[10px] text-white/60 font-mono">
+                    {!liveInfo
+                      ? "Aucune donnée reçue : ouvrez l'application sur un poste Admin."
+                      : liveInfo.relayAlive
+                      ? `Relais Admin actif (dernier envoi il y a ${liveInfo.relayAgeSec} s).`
+                      : `Relais Admin arrêté (dernier envoi il y a ${liveInfo.relayAgeSec} s).`}
+                  </div>
+                )}
               </div>
               <label className="flex flex-col gap-1 text-white text-xs">
                 Capacité réservoir (litres)
@@ -2603,6 +2887,18 @@ export default function PitBoard() {
                               {car.pilote && (
                                 <div className="text-white/50 text-[11px] mt-0.5 truncate">{car.pilote}</div>
                               )}
+                              {(() => {
+                                const live = liveFor(car);
+                                if (!live || (!live.pos && live.laps == null)) return null;
+                                return (
+                                  <div className="text-[11px] font-black font-mono text-white/80 mt-0.5">
+                                    P{live.pos || "-"}
+                                    {live.laps != null && (
+                                      <span className="text-white/50 font-semibold"> · {live.laps} tours</span>
+                                    )}
+                                  </div>
+                                );
+                              })()}
                             </div>
                             {call && call.fuel && (
                               <span
@@ -2616,7 +2912,7 @@ export default function PitBoard() {
                                 ⛽ {call.fuel === "oui" ? "Oui" : "Non"}
                               </span>
                             )}
-                            {!call && (
+                            {!call && !liveFor(car) && (
                               <span className="text-white/40 text-[10px] font-bold">P{car.classement || "-"}</span>
                             )}
                           </button>
@@ -2651,16 +2947,23 @@ export default function PitBoard() {
                                 <label className="text-white/60 text-[10px] uppercase tracking-widest whitespace-nowrap">
                                   Classement général
                                 </label>
-                                <input
-                                  type="number"
-                                  min="1"
-                                  value={car.classement || ""}
-                                  onClick={(e) => e.stopPropagation()}
-                                  onChange={(e) =>
-                                    updateCar(car.id, "classement", Number(e.target.value) || 0)
-                                  }
-                                  className="w-16 px-2 py-0.5 text-sm rounded bg-black/50 text-white border border-white/20 focus:outline-none focus:border-white"
-                                />
+                                {liveFor(car) && liveFor(car).pos ? (
+                                  <span className="text-sm font-black font-mono text-white">
+                                    P{liveFor(car).pos}{" "}
+                                    <span className="text-white/50 text-[10px] font-semibold">(live)</span>
+                                  </span>
+                                ) : (
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    value={car.classement || ""}
+                                    onClick={(e) => e.stopPropagation()}
+                                    onChange={(e) =>
+                                      updateCar(car.id, "classement", Number(e.target.value) || 0)
+                                    }
+                                    className="w-16 px-2 py-0.5 text-sm rounded bg-black/50 text-white border border-white/20 focus:outline-none focus:border-white"
+                                  />
+                                )}
                               </div>
                               {/* RELAIS : chrono en cours + historique */}
                               {(() => {
