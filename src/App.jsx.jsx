@@ -626,6 +626,10 @@ function CarVideo({ url }) {
   const [open, setOpen] = useState(false);
   const clean = typeof url === "string" ? url.trim() : "";
   if (!/^https?:\/\//i.test(clean)) return null;
+  // liens YouTube (watch, youtu.be, live, embed) -> lecteur intégré ; sinon l'adresse telle quelle
+  let src = clean;
+  const yt = clean.match(/(?:youtube\.com\/(?:watch\?(?:.*&)?v=|live\/|embed\/|shorts\/)|youtu\.be\/)([\w-]{11})/i);
+  if (yt) src = "https://www.youtube.com/embed/" + yt[1] + "?autoplay=1&mute=1";
   return (
     <div className="pt-1 border-t border-white/10">
       <div className="flex items-center gap-2">
@@ -648,12 +652,12 @@ function CarVideo({ url }) {
         <div className="mt-2">
           <div className="relative w-full" style={{ paddingTop: "56.25%" }}>
             <iframe
-              src={clean}
+              src={src}
               title="Vidéo MyRacesLive"
               className="absolute inset-0 w-full h-full rounded bg-black"
               allow="autoplay; fullscreen; picture-in-picture"
               allowFullScreen
-              referrerPolicy="no-referrer"
+              referrerPolicy="strict-origin-when-cross-origin"
             />
           </div>
           <div className="text-[10px] text-white/50 mt-1">
