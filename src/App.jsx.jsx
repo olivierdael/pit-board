@@ -622,8 +622,9 @@ function mergeStintEntry(log, entry) {
 // champ texte qui n'enregistre qu'en quittant le champ (ou sur Entrée) : pas d'aller-retour
 // avec les autres postes pendant la frappe
 // Vidéo MyRacesLive d'une voiture : lecteur intégré (si la plateforme l'autorise) + lien de secours
-function CarVideo({ url }) {
-  const [open, setOpen] = useState(false);
+function CarVideo({ url, always }) {
+  const [open0, setOpen] = useState(false);
+  const open = always || open0;
   const clean = typeof url === "string" ? url.trim() : "";
   if (!/^https?:\/\//i.test(clean)) return null;
   // liens YouTube (watch, youtu.be, live, embed) -> lecteur intégré ; sinon l'adresse telle quelle
@@ -633,12 +634,14 @@ function CarVideo({ url }) {
   return (
     <div className="pt-1 border-t border-white/10">
       <div className="flex items-center gap-2">
-        <button
-          onClick={() => setOpen((o) => !o)}
-          className="px-2 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-[11px] font-bold uppercase tracking-wide"
-        >
-          {open ? "Masquer la vidéo" : "▶ Vidéo live"}
-        </button>
+        {!always && (
+          <button
+            onClick={() => setOpen((o) => !o)}
+            className="px-2 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-[11px] font-bold uppercase tracking-wide"
+          >
+            {open ? "Masquer la vidéo" : "▶ Vidéo live"}
+          </button>
+        )}
         <a
           href={clean}
           target="_blank"
@@ -4248,7 +4251,6 @@ export default function PitBoard() {
                               </div>
                             );
                           })()}
-                          {!compact && <CarVideo url={(settings.carVideos || {})[car.id]} />}
                         </div>
                       </div>
                     );
@@ -4266,7 +4268,22 @@ export default function PitBoard() {
                 }
                 // team manager : une seule tuile, centrée
                 if (myCar) {
-                  return <div className="max-w-xl w-full mx-auto">{carTiles.map((t) => renderTile(t))}</div>;
+                  const vurl = (settings.carVideos || {})[myCar.id];
+                  const hasVideo = typeof vurl === "string" && /^https?:\/\//i.test(vurl.trim());
+                  return (
+                    <div className={hasVideo ? "w-full flex flex-col lg:flex-row gap-3 items-start" : "max-w-xl w-full mx-auto"}>
+                      <div className={hasVideo ? "w-full lg:w-1/2 order-2 lg:order-1" : ""}>
+                        {carTiles.map((t) => renderTile(t))}
+                      </div>
+                      {hasVideo && (
+                        <div
+                          className="w-full lg:w-1/2 order-1 lg:order-2 sticky top-0 z-30 rounded-2xl bg-neutral-900/95 p-2 shadow-lg"
+                        >
+                          <CarVideo url={vurl} always />
+                        </div>
+                      )}
+                    </div>
+                  );
                 }
                 return chunkArray(carTiles, 3).map((row, rowIdx) => (
                   <div
