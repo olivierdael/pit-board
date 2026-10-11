@@ -989,7 +989,9 @@ export default function PitBoard() {
   const [openDriverCars, setOpenDriverCars] = useState(() => new Set()); // voitures dont l'éditeur de pilotes est ouvert
   // dernier flux reçu via Supabase (écrit par le poste Admin relais) et état du relais local
   const [liveRow, setLiveRow] = useState(null); // { seq, generatedAt, fetchedAt, uuid, status, trackStateRaw, cars }
-  const [relayStatus, setRelayStatus] = useState(null); // seulement sur le poste Admin qui relaie
+  const [relayStatus, setRelayStatus] = useState(null);
+  const lastRawRef = useRef(null); // dernier flux brut reçu (poste Admin), pour l'échantillon de diagnostic
+  const [sampleText, setSampleText] = useState(""); // seulement sur le poste Admin qui relaie
   const pushFlagRef = useRef(null);
   const lastFeedFlagRef = useRef(null);
   const lastSeenFlagRef = useRef(null);
@@ -1461,6 +1463,7 @@ export default function PitBoard() {
       setRelayStatus(null);
       return;
     }
+    setRelayStatus(null); // efface l'ancien message (ex. erreur de la lecture directe) à chaque changement de mode
     let stopped = false;
     let busy = false;
     let lastSeq = null;
@@ -1501,6 +1504,7 @@ export default function PitBoard() {
     // postes, applique les drapeaux automatiques et met à jour l'état du relais
     async function ingest(raw, via, srcUuid) {
       {
+        lastRawRef.current = raw;
         const live = parseLiveTiming(raw);
         const nowMs = Date.now();
         let writeError = "";
@@ -3152,6 +3156,46 @@ export default function PitBoard() {
                     )}
                     {relayStatus && !relayStatus.ok && (
                       <span className="text-red-400">Relais en erreur : {relayStatus.error}</span>
+                    )}
+                  </div>
+                )}
+                {isAdmin && settings.liveEnabled && (
+                  <div className="flex flex-col gap-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const raw = lastRawRef.current;
+                        if (!raw) {
+                          setSampleText("Aucun flux reçu pour l'instant sur ce poste.");
+                          return;
+                        }
+                        const cut = (v, d) => {
+                          if (Array.isArray(v)) return v.slice(0, d === 0 ? 3 : 2).map((x) => cut(x, d + 1));
+                          if (v && typeof v === "object") {
+                            const o = {};
+                            Object.keys(v).forEach((k) => (o[k] = cut(v[k], d + 1)));
+                            return o;
+                          }
+                          return v;
+                        };
+                        const txt = JSON.stringify(cut(raw, 0), null, 1).slice(0, 12000);
+                        setSampleText(txt);
+                        try {
+                          navigator.clipboard && navigator.clipboard.writeText(txt);
+                        } catch (e) {}
+                      }}
+                      className="self-start px-2 py-1 rounded bg-black/50 text-white text-[10px] border border-white/20 hover:bg-black/70"
+                    >
+                      Copier un échantillon du flux (diagnostic)
+                    </button>
+                    {sampleText && (
+                      <textarea
+                        readOnly
+                        value={sampleText}
+                        rows={6}
+                        onFocus={(e) => e.target.select()}
+                        className="w-full text-[10px] font-mono rounded bg-black/60 text-white border border-white/20 p-1"
+                      />
                     )}
                   </div>
                 )}
