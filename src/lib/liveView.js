@@ -69,3 +69,36 @@ export function clockNow(info, nowMs) {
     remainingSec: info.remainingMs != null ? Math.max(0, info.remainingMs / 1000 - dt) : null,
   };
 }
+
+// numéros de voiture cités dans un message RC : "N°439 - ...", "N 292 30 SECONDES...", "#12", "N292"
+export function carNumbersIn(message) {
+  const out = [];
+  const re = /(?:^|[^A-Za-z0-9])(?:N\s*[°º]?|#)\s*(\d{1,4})(?!\d)/gi;
+  let m;
+  while ((m = re.exec(String(message || ""))) !== null) {
+    const n = String(Number(m[1]));
+    if (!out.includes(n)) out.push(n);
+  }
+  return out;
+}
+
+// messages RC à afficher à ce poste.
+//  - sans numéro de voiture : information générale, visible par tous ;
+//  - avec numéro(s) : seulement si l'un d'eux fait partie de nos voitures (wanted = ["446", ...]).
+// Un message reste affiché maxAgeMs après sa première apparition ; les très anciens sont ignorés.
+// seen = { clé: instant de première apparition } (objet conservé par l'appelant).
+export function visibleRcMessages(rc, wanted, nowMs, seen, dismissed, generatedAt, maxAgeMs = 180000) {
+  const want = new Set(wanted || []);
+  const out = [];
+  (rc || []).forEach((e) => {
+    if (generatedAt && e.at && generatedAt - e.at > 10 * 60000) return; // message ancien
+    const key = `${e.id}|${e.message}`;
+    if (seen[key] == null) seen[key] = nowMs;
+    if (dismissed && dismissed.has(key)) return;
+    if (nowMs - seen[key] > maxAgeMs) return;
+    const nums = carNumbersIn(e.message);
+    if (nums.length > 0 && !nums.some((n) => want.has(n))) return;
+    out.push({ key, message: e.message, nums: nums.filter((n) => want.has(n)), at: e.at, seenAt: seen[key] });
+  });
+  return out;
+}

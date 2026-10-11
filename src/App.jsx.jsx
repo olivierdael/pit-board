@@ -22,7 +22,7 @@ import {
   observeLap,
   mergeBest,
 } from "./lib/drivers";
-import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow } from "./lib/liveView";
+import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages } from "./lib/liveView";
 import {
   Flag,
   Plus,
@@ -1104,6 +1104,7 @@ export default function PitBoard() {
     liveEnabled: false, // flux RIS Live Timing (classement, tours) relayé par un poste Admin
     liveUuid: "", // uuid du flux RIS (change à chaque événement)
     liveSource: "direct", // "direct" : le poste Admin lit le flux ; "page" : il le reçoit de la page RIS ouverte (favori)
+    rcLog: [], // historique des messages RC [{ t (ms), m }]
     liveRisUrl: "", // adresse de la page RIS à ouvrir pour le mode "page" (ex. https://live.ris-timing.be/funbe)
     liveFlagAuto: false, // drapeaux vert/jaune pilotés par le flux (le rouge reste manuel)
     drivers: {}, // pilotes par voiture : { [idVoiture]: { list, relays } } (voir lib/drivers.js)
@@ -1221,6 +1222,7 @@ export default function PitBoard() {
       status: liveRow.status || "",
       trackStateRaw: liveRow.trackStateRaw,
       generatedAt: liveRow.generatedAt,
+      rc: Array.isArray(liveRow.rc) ? liveRow.rc : [],
       elapsedMs: liveRow.elapsedMs == null ? null : liveRow.elapsedMs,
       remainingMs: liveRow.remainingMs == null ? null : liveRow.remainingMs,
     };
@@ -1235,6 +1237,37 @@ export default function PitBoard() {
   function rankOf(car) {
     const l = liveFor(car);
     return (l && l.pos) || car.classement || 0;
+  }
+
+  // messages de la direction de course (RC) : généraux pour tous, ou filtrés sur nos numéros de voiture
+  const rcSeenRef = useRef({});
+  const [rcDismissed, setRcDismissed] = useState(() => new Set());
+  const rcMessages = useMemo(() => {
+    if (!settings.liveEnabled || !liveInfo || !liveInfo.rc || liveInfo.rc.length === 0) return [];
+    const wanted = (role === "manager" ? (myCar ? [myCar] : []) : allConfiguredCars).map((c) =>
+      String(Number(normalizeCarNumber(c.numero)))
+    );
+    return visibleRcMessages(liveInfo.rc, wanted, now, rcSeenRef.current, rcDismissed, liveInfo.generatedAt);
+  }, [settings.liveEnabled, liveInfo, role, myCar, allConfiguredCars, now, rcDismissed]);
+  // message RC visé par numéro de voiture (pour la tuile de cette voiture)
+  function rcForCar(car) {
+    const n = String(Number(normalizeCarNumber(car.numero)));
+    return rcMessages.filter((m) => m.nums.includes(n));
+  }
+
+  // historique conservé des messages RC pour une voiture : ceux qui la citent + les messages généraux,
+  // du plus récent au plus ancien (heure = première apparition dans le flux, enregistrée par le poste Admin)
+  function rcLogForCar(car) {
+    const log = Array.isArray(settings.rcLog) ? settings.rcLog : [];
+    if (log.length === 0) return [];
+    const n = String(Number(normalizeCarNumber(car.numero)));
+    return log
+      .filter((l) => {
+        const nums = carNumbersIn(l.m);
+        return nums.length === 0 || nums.includes(n);
+      })
+      .slice()
+      .reverse();
   }
 
   // diagnostic automatique minimal : détecte les incohérences de données courantes
@@ -1612,7 +1645,7 @@ export default function PitBoard() {
       lastFeedFlagRef.current = live.flag;
 
       if (!settingsRef.current.liveFlagAuto) return;
-      if (!live.flag) return; // rouge, safety car, statut vide... : pas de changement automatique
+      if (!live.flag) return; // état de piste vide ou inconnu : pas de changement automatique
       if (live.status === "FINISHED") return;
       if (nowMs - live.generatedAt > 90000) return; // flux ancien : on ne touche pas au drapeau
       const ov = manualOverrideRef.current;
@@ -1620,7 +1653,8 @@ export default function PitBoard() {
         if (ov.feedFlag === live.flag) return;
         manualOverrideRef.current = null;
       }
-      if (cur === "rouge") return; // le rouge se lève à la main
+      // un rouge posé à la main se lève à la main ; un rouge venu du flux se lève avec lui
+      if (cur === "rouge" && autoPushedFlagRef.current !== "rouge") return;
       if (cur === live.flag) return;
       autoPushedFlagRef.current = live.flag;
       lastSeenFlagRef.current = live.flag;
@@ -1658,6 +1692,21 @@ export default function PitBoard() {
       if (changed) pushSettings({ ...settingsRef.current, drivers });
     }
 
+    // historique des messages RC : le poste Admin qui relaie note chaque nouveau message avec l'heure
+    // à laquelle il apparaît (l'heure "at" du flux est celle de la génération du flux, pas de la parution)
+    let rcPrev = null;
+    function recordRc(live, nowMs) {
+      const msgs = live.rc || [];
+      const log = Array.isArray(settingsRef.current.rcLog) ? settingsRef.current.rcLog : [];
+      const added = [];
+      msgs.forEach((e) => {
+        const isNew = rcPrev ? !rcPrev.has(e.id + "|" + e.message) : !log.some((l) => l.m === e.message);
+        if (isNew) added.push({ t: nowMs, m: e.message });
+      });
+      rcPrev = new Set(msgs.map((e) => e.id + "|" + e.message));
+      if (added.length > 0) pushSettings({ ...settingsRef.current, rcLog: [...log, ...added].slice(-300) });
+    }
+
     // traite un flux reçu (lecture directe ou page RIS) : l'écrit dans Supabase pour tous les
     // postes, applique les drapeaux automatiques et met à jour l'état du relais
     async function ingest(raw, via, srcUuid) {
@@ -1676,6 +1725,7 @@ export default function PitBoard() {
             trackStateRaw: live.trackStateRaw,
             elapsedMs: live.elapsedMs,
             remainingMs: live.remainingMs,
+            rc: live.rc,
             cars: live.cars,
           };
           const { error } = await supabase
@@ -1690,6 +1740,7 @@ export default function PitBoard() {
         applyAutoFlag(live, nowMs);
         try {
           recordBests(live);
+          recordRc(live, nowMs);
         } catch (e) {}
         if (!stopped) {
           setRelayStatus({
@@ -1991,6 +2042,7 @@ export default function PitBoard() {
       eventStartAt: "",
       eventDurationSec: 0,
       drivers: resetDriverRelays(settings.drivers),
+      rcLog: [],
     });
     setExpandedTiles(new Set());
     setConfirmExitId(null);
@@ -2989,7 +3041,7 @@ export default function PitBoard() {
                   <>🟠 Live : flux figé</>
                 )}
                 {liveInfo && liveInfo.relayAlive && liveInfo.status !== "FINISHED" && liveInfo.feedFresh && (
-                  <>🟢 Live{settings.liveFlagAuto ? " · drapeaux auto" : ""}</>
+                  <>🟢 Live{settings.liveFlagAuto ? " · drapeaux auto" : ""}{liveInfo.trackStateRaw ? ` · ${liveInfo.trackStateRaw}` : ""}</>
                 )}
               </div>
             )}
@@ -3586,6 +3638,35 @@ export default function PitBoard() {
           </div>
         )}
 
+        {/* DIRECTION DE COURSE (RC) : grand, en rouge */}
+        {rcMessages.length > 0 && (
+          <div className="mb-3 flex flex-col gap-2">
+            {rcMessages.map((m) => (
+              <div
+                key={m.key}
+                className="rounded-xl px-4 py-3 flex items-start gap-3 shadow-lg animate-pulse"
+                style={{ backgroundColor: "#c40000", border: "3px solid #ff4040", animationIterationCount: 3 }}
+              >
+                <AlertTriangle size={30} color="#fff" className="flex-shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                  <div className="text-white/80 text-[11px] font-bold uppercase tracking-widest">
+                    Direction de course (RC)
+                    {m.nums.length > 0 && <> · voiture{m.nums.length > 1 ? "s" : ""} {m.nums.map((n) => "#" + n).join(" ")}</>}
+                  </div>
+                  <div className="text-white text-xl sm:text-2xl font-black leading-snug break-words">{m.message}</div>
+                </div>
+                <button
+                  onClick={() => setRcDismissed((prev) => new Set(prev).add(m.key))}
+                  className="text-white/80 hover:text-white flex-shrink-0"
+                  title="Masquer ce message"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* GRILLE DE DÉPART */}
         <div className="mb-4">
           <h2 className="text-white font-bold tracking-wide uppercase text-xs mb-2 flex items-center gap-2">
@@ -3718,6 +3799,17 @@ export default function PitBoard() {
                               onSet={(n, driverId) => confirmRelayDriver(car.id, n, driverId)}
                             />
                           )}
+
+                          {/* RC visant cette voiture */}
+                          {rcForCar(car).map((m) => (
+                            <div
+                              key={m.key}
+                              className="rounded px-2 py-1 text-white font-black text-xs leading-snug"
+                              style={{ backgroundColor: "#c40000", border: "1px solid #ff4040" }}
+                            >
+                              ⚠ RC : {m.message}
+                            </div>
+                          ))}
 
                           {/* LIVE RIS : temps de course, intermédiaires, voisins au classement */}
                           {!compact && liveInfo && liveInfo.relayAlive && liveFor(car) && (
@@ -4089,6 +4181,25 @@ export default function PitBoard() {
                               )}
                             </div>
                           )}
+
+                          {/* HISTORIQUE RC de cette voiture (+ messages généraux), heure réelle de parution */}
+                          {(() => {
+                            const log = rcLogForCar(car);
+                            if (log.length === 0) return null;
+                            const shown = compact ? log.slice(0, 1) : log;
+                            return (
+                              <div
+                                className="flex flex-col gap-0.5 pt-1 border-t border-white/10 overflow-y-auto"
+                                style={{ maxHeight: compact ? undefined : 90 }}
+                              >
+                                {shown.map((l, i) => (
+                                  <div key={l.t + "-" + i} className="text-[10px] leading-snug font-semibold" style={{ color: "#ff5a5a" }}>
+                                    <span className="font-mono">{new Date(l.t).toLocaleTimeString("fr-BE")}</span> · RC : {l.m}
+                                  </div>
+                                ))}
+                              </div>
+                            );
+                          })()}
                         </div>
                       </div>
                     );

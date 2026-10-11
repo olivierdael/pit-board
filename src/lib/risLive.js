@@ -42,13 +42,17 @@ export async function fetchLiveTiming(uuid) {
   throw new Error(errors.join(" | "));
 }
 
-// "green"/"yellow" (ou vert/jaune) -> "vert"/"jaune". Tout le reste (rouge, safety car,
-// null...) -> null : l'application ne change alors rien toute seule.
+// état de piste du flux -> drapeau PitBoard : "vert" | "jaune" | "rouge" ; null si inconnu / vide
+// (alors l'application ne change rien toute seule). Valeurs vues en direct : "GREEN".
+// Jaune : yellow, FCY, safety car, SC, VSC. Rouge : red.
 export function normalizeTrackState(v) {
   if (typeof v !== "string") return null;
-  const s = v.trim().toLowerCase();
+  const s = v.trim().toLowerCase().replace(/[\s_-]+/g, " ");
+  if (!s) return null;
   if (s === "green" || s === "vert") return "vert";
-  if (s === "yellow" || s === "jaune") return "jaune";
+  if (s.includes("red") || s.includes("rouge")) return "rouge";
+  if (s.includes("yellow") || s.includes("jaune") || s.includes("fcy") || s.includes("safety") || s === "sc" || s === "vsc")
+    return "jaune";
   return null;
 }
 
@@ -112,6 +116,12 @@ export function parseLiveTiming(raw) {
     };
   });
 
+  // messages de la direction de course (RC) : [{ id, at (ms), message }]
+  const rc = (Array.isArray(raw.events) ? raw.events : [])
+    .filter((e) => e && e.kind === "RC_MESSAGE" && typeof e.message === "string" && e.message.trim())
+    .slice(-20)
+    .map((e) => ({ id: String(e.id == null ? "" : e.id), at: Date.parse(e.at) || 0, message: e.message.trim() }));
+
   const session = (raw.context && raw.context.session) || {};
   const clock = session.clock || {};
   let generatedAt = Date.parse(raw.generated_at);
@@ -125,6 +135,7 @@ export function parseLiveTiming(raw) {
     flag: normalizeTrackState(session.track_state),
     elapsedMs: asMs(clock.elapsed_ms),
     remainingMs: asMs(clock.remaining_ms),
+    rc,
     cars,
   };
 }
