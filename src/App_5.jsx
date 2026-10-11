@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from "react";
 import { supabase } from "./lib/supabase";
 import { fetchLiveTiming, parseLiveTiming, normalizeCarNumber } from "./lib/risLive";
+import { RIS_ORIGIN, buildBookmarklet, readRisMessage } from "./lib/risBridge";
 import {
   MAX_DRIVERS,
   MIN_DRIVERS,
@@ -892,6 +893,48 @@ export default function PitBoard() {
   const canEdit = role !== "readonly";
   const isAdmin = role === "admin";
 
+  // Team Manager : il choisit son numéro de voiture une fois par appareil et ne voit ensuite que
+  // sa voiture (comme pour le rôle, c'est un réglage d'interface, pas une vraie sécurité)
+  const [myCarId, setMyCarId] = useState(() => {
+    try {
+      const v = localStorage.getItem("pitboard_car");
+      return v ? Number(v) : null;
+    } catch (e) {
+      return null;
+    }
+  });
+  function chooseMyCar(id) {
+    try {
+      localStorage.setItem("pitboard_car", String(id));
+    } catch (e) {}
+    setMyCarId(id);
+  }
+  function resetRoleAndCar() {
+    try {
+      localStorage.removeItem("pitboard_role");
+      localStorage.removeItem("pitboard_car");
+    } catch (e) {}
+    setMyCarId(null);
+    setRole(null);
+  }
+  // Admin : tableau récapitulatif compact (toutes les tuiles fermées, sur un seul écran)
+  const [recap, setRecap] = useState(() => {
+    try {
+      return localStorage.getItem("pitboard_recap") !== "0";
+    } catch (e) {
+      return true;
+    }
+  });
+  function toggleRecap() {
+    setRecap((prev) => {
+      try {
+        localStorage.setItem("pitboard_recap", prev ? "0" : "1");
+      } catch (e) {}
+      return !prev;
+    });
+  }
+  const recapView = isAdmin && recap;
+
   const [flag, setFlag] = useState("vert");
   const [flash, setFlash] = useState(false);
   const [cars, setCars] = useState(emptyCars());
@@ -937,6 +980,8 @@ export default function PitBoard() {
     circuitLengthKm: 0,
     liveEnabled: false, // flux RIS Live Timing (classement, tours) relayé par un poste Admin
     liveUuid: "", // uuid du flux RIS (change à chaque événement)
+    liveSource: "direct", // "direct" : le poste Admin lit le flux ; "page" : il le reçoit de la page RIS ouverte (favori)
+    liveRisUrl: "", // adresse de la page RIS à ouvrir pour le mode "page" (ex. https://live.ris-timing.be/funbe)
     liveFlagAuto: false, // drapeaux vert/jaune pilotés par le flux (le rouge reste manuel)
     drivers: {}, // pilotes par voiture : { [idVoiture]: { list, relays } } (voir lib/drivers.js)
   });
@@ -1006,10 +1051,32 @@ export default function PitBoard() {
     }
   }, [calls, confirmExitId]);
 
-  const configuredCars = useMemo(
+  const allConfiguredCars = useMemo(
     () => cars.filter((c) => c.numero.trim() !== ""),
     [cars]
   );
+  // voiture du team manager connecté (null pour les autres rôles ou tant qu'il n'a pas choisi)
+  const myCar = role === "manager" ? allConfiguredCars.find((c) => c.id === myCarId) || null : null;
+  // voitures visibles sur cet écran : toutes, sauf pour un team manager qui ne voit que la sienne
+  const configuredCars = useMemo(
+    () => (role === "manager" ? (myCar ? [myCar] : []) : allConfiguredCars),
+    [allConfiguredCars, role, myCar]
+  );
+  // annonces vocales : un team manager n'entend que celles de sa propre voiture
+  const myCarIdRef = useRef(null);
+  useEffect(() => {
+    myCarIdRef.current = myCar ? myCar.id : null;
+  }, [myCar]);
+  function speaksFor(carId) {
+    return myCarIdRef.current == null || myCarIdRef.current === carId;
+  }
+  // formulaires d'annonce et de message : la voiture du team manager est présélectionnée
+  useEffect(() => {
+    if (myCar) {
+      setFCar(String(myCar.id));
+      setMCar(String(myCar.id));
+    }
+  }, [myCar && myCar.id]);
 
   // flux live (RIS) tel que reçu par cet écran. Le classement et les tours sont utilisés
   // tant que le relais Admin est vivant ; si le flux lui-même n'évolue plus (feedFresh = false),
@@ -1044,7 +1111,7 @@ export default function PitBoard() {
   // diagnostic automatique minimal : détecte les incohérences de données courantes
   const diagnostics = useMemo(() => {
     const issues = [];
-    const numeros = configuredCars.map((c) => c.numero.trim());
+    const numeros = allConfiguredCars.map((c) => c.numero.trim());
     const dupes = numeros.filter((n, i) => numeros.indexOf(n) !== i);
     [...new Set(dupes)].forEach((n) => issues.push(`Numéro de voiture en double : #${n}`));
 
@@ -1063,7 +1130,7 @@ export default function PitBoard() {
     if (settings.yellowSpeedKmh <= 0) issues.push("Vitesse drapeau jaune invalide (≤ 0 km/h)");
     if (settings.maxFuelSimultaneous <= 0) issues.push("Nombre de pompes invalide (≤ 0)");
     return issues;
-  }, [cars, configuredCars, calls, stints, techChecks, settings]);
+  }, [cars, allConfiguredCars, calls, stints, techChecks, settings]);
 
   function toggleExpand(carId) {
     setExpandedTiles((prev) => {
@@ -1223,7 +1290,7 @@ export default function PitBoard() {
           return;
         }
         const call = callRowToApp(row);
-        if (payload.eventType === "INSERT" && soundOnRef.current && !justAddedLocallyRef.current.has(call.id)) {
+        if (payload.eventType === "INSERT" && soundOnRef.current && speaksFor(call.carId) && !justAddedLocallyRef.current.has(call.id)) {
           const secs = (call.arrivalAt - Date.now()) / 1000;
           speakAnnouncement(audioCtxRef, call.numero, secs);
         }
@@ -1232,7 +1299,7 @@ export default function PitBoard() {
         // donc cette condition est fausse et la phrase n'est pas rejouée une 2e fois.
         if (payload.eventType === "UPDATE" && soundOnRef.current) {
           const before = callsRef.current.find((c) => c.id === call.id);
-          if (before && before.phase === "countdown" && call.phase === "instand") {
+          if (before && before.phase === "countdown" && call.phase === "instand" && speaksFor(call.carId)) {
             speakTrackPoint(audioCtxRef, call.numero, "Entrée");
           }
         }
@@ -1247,7 +1314,7 @@ export default function PitBoard() {
           return;
         }
         const msg = messageRowToApp(payload.new);
-        if (payload.eventType === "INSERT" && soundOnRef.current && !justAddedMessageLocallyRef.current.has(msg.id)) {
+        if (payload.eventType === "INSERT" && soundOnRef.current && speaksFor(msg.carId) && !justAddedMessageLocallyRef.current.has(msg.id)) {
           speakMessage(audioCtxRef, msg.numero, msg.pilote, msg.text);
         }
         setMessages((prev) => {
@@ -1387,8 +1454,10 @@ export default function PitBoard() {
   // reçoivent par Realtime. Les drapeaux vert/jaune sont appliqués ici si l'option est active.
   useEffect(() => {
     const uuid = (settings.liveUuid || "").trim();
-    // on ne démarre que sur un uuid complet : pendant la saisie, aucune requête partielle n'est envoyée
-    if (!isAdmin || !settings.liveEnabled || !/^[0-9a-fA-F-]{36}$/.test(uuid)) {
+    const pageMode = settings.liveSource === "page";
+    // en lecture directe, on ne démarre que sur un uuid complet : pendant la saisie, aucune
+    // requête partielle n'est envoyée. En mode "page", l'uuid vient de la page RIS elle-même.
+    if (!isAdmin || !settings.liveEnabled || (!pageMode && !/^[0-9a-fA-F-]{36}$/.test(uuid))) {
       setRelayStatus(null);
       return;
     }
@@ -1428,18 +1497,16 @@ export default function PitBoard() {
       if (pushFlagRef.current) pushFlagRef.current(live.flag);
     }
 
-    async function tick() {
-      if (busy || stopped) return;
-      busy = true;
-      try {
-        const { raw, via } = await fetchLiveTiming(uuid);
-        if (stopped) return;
+    // traite un flux reçu (lecture directe ou page RIS) : l'écrit dans Supabase pour tous les
+    // postes, applique les drapeaux automatiques et met à jour l'état du relais
+    async function ingest(raw, via, srcUuid) {
+      {
         const live = parseLiveTiming(raw);
         const nowMs = Date.now();
         let writeError = "";
         if (live.seq !== lastSeq || nowMs - lastWriteAt >= 10000) {
           const payload = {
-            uuid,
+            uuid: srcUuid,
             seq: live.seq,
             generatedAt: live.generatedAt,
             fetchedAt: nowMs,
@@ -1469,13 +1536,44 @@ export default function PitBoard() {
             status: live.status,
           });
         }
-      } catch (e) {
-        if (!stopped) {
-          setRelayStatus({ ok: false, error: (e && e.message) || String(e), at: Date.now() });
+        // mode "page" : l'uuid vient de la page RIS, on le mémorise pour que tous les postes
+        // reconnaissent le flux (changer l'uuid redémarre ce relais, sans conséquence)
+        if (pageMode && srcUuid && srcUuid !== (settingsRef.current.liveUuid || "").trim()) {
+          pushSettings({ ...settingsRef.current, liveUuid: srcUuid });
         }
+      }
+    }
+
+    const showError = (e) => {
+      if (!stopped) setRelayStatus({ ok: false, error: (e && e.message) || String(e), at: Date.now() });
+    };
+
+    async function tick() {
+      if (busy || stopped) return;
+      busy = true;
+      try {
+        const { raw, via } = await fetchLiveTiming(uuid);
+        if (stopped) return;
+        await ingest(raw, via, uuid);
+      } catch (e) {
+        showError(e);
       } finally {
         busy = false;
       }
+    }
+
+    if (pageMode) {
+      // flux transmis par la page RIS (favori) : seuls les messages venant de RIS sont acceptés
+      const onMessage = (event) => {
+        const msg = readRisMessage(event);
+        if (!msg) return;
+        ingest(msg.raw, "page", msg.uuid || uuid).catch(showError);
+      };
+      window.addEventListener("message", onMessage);
+      return () => {
+        stopped = true;
+        window.removeEventListener("message", onMessage);
+      };
     }
 
     tick();
@@ -1484,7 +1582,7 @@ export default function PitBoard() {
       stopped = true;
       clearInterval(timer);
     };
-  }, [isAdmin, settings.liveEnabled, settings.liveUuid]);
+  }, [isAdmin, settings.liveEnabled, settings.liveUuid, settings.liveSource]);
 
   // quand on (dés)active les drapeaux auto, on repart de zéro : plus de commande manuelle en attente
   useEffect(() => {
@@ -2188,7 +2286,7 @@ export default function PitBoard() {
     justAddedMessageLocallyRef.current.add(newMsg.id);
     setTimeout(() => justAddedMessageLocallyRef.current.delete(newMsg.id), 4000);
     setMText("");
-    setMCar("");
+    setMCar(myCarIdRef.current != null ? String(myCarIdRef.current) : "");
   }
 
   function removeMessage(id) {
@@ -2428,7 +2526,7 @@ export default function PitBoard() {
     // l'écho Realtime de cette même insertion ne redéclenche pas la voix
     justAddedLocallyRef.current.add(newCall.id);
     setTimeout(() => justAddedLocallyRef.current.delete(newCall.id), 4000);
-    setFCar("");
+    setFCar(myCarIdRef.current != null ? String(myCarIdRef.current) : "");
     setFMin("");
     setFSec("");
     setFFuel("");
@@ -2532,6 +2630,53 @@ export default function PitBoard() {
     );
   }
 
+  // team manager : choix de sa voiture (une seule fois par appareil), parmi celles que l'admin a encodées
+  if (role === "manager" && !myCar) {
+    return (
+      <div className="min-h-screen w-full flex items-center justify-center bg-neutral-900 px-4">
+        <div className="max-w-sm w-full bg-black/60 border border-white/20 rounded-2xl p-6 flex flex-col gap-3">
+          <h1 className="text-white text-xl font-black text-center mb-2">Votre voiture</h1>
+          {allConfiguredCars.length === 0 ? (
+            <p className="text-white/70 text-sm text-center">
+              Aucune voiture n'est encore encodée. L'admin doit d'abord saisir les numéros de voiture dans la
+              configuration ; cette liste se mettra à jour toute seule.
+            </p>
+          ) : (
+            <>
+              <p className="text-white/60 text-xs text-center mb-2">
+                Choisissez votre numéro : vous ne verrez ensuite que votre voiture.
+              </p>
+              {allConfiguredCars.map((c) => (
+                <button
+                  key={c.id}
+                  onClick={() => chooseMyCar(c.id)}
+                  className="w-full text-left px-4 py-2.5 rounded-lg bg-white/10 hover:bg-white/20 border border-white/20 transition-colors flex items-center gap-3"
+                >
+                  <span
+                    className="w-3 h-8 rounded-sm flex-shrink-0"
+                    style={{ background: `linear-gradient(${c.couleur1} 50%, ${c.couleur2} 50%)` }}
+                  />
+                  <span>
+                    <span className="block text-white font-bold text-sm">#{c.numero}</span>
+                    {c.team && <span className="block text-white/50 text-xs">{c.team}</span>}
+                  </span>
+                </button>
+              ))}
+            </>
+          )}
+          <button
+            onClick={resetRoleAndCar}
+            className="text-white/50 text-xs underline self-center mt-1 hover:text-white"
+          >
+            Changer de rôle
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const visibleMessages = myCar ? messages.filter((m) => m.carId === myCar.id || m.numero === myCar.numero) : messages;
+
   return (
     <div
       className="min-h-screen w-full transition-colors duration-500 ease-in-out"
@@ -2583,6 +2728,15 @@ export default function PitBoard() {
             >
               {advancedMode ? "🔧 Mode avancé" : "⚡ Mode simple"}
             </button>
+            {isAdmin && (
+              <button
+                onClick={toggleRecap}
+                className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide bg-black/20 text-black"
+                title="Vue récapitulative compacte (toutes les tuiles fermées sur un seul écran) ou vue détaillée"
+              >
+                {recap ? "▦ Vue récap" : "▤ Vue détaillée"}
+              </button>
+            )}
             {isAdmin && (
               <button
                 onClick={() => setShowSettings((s) => !s)}
@@ -2660,12 +2814,7 @@ export default function PitBoard() {
               </div>
             )}
             <button
-              onClick={() => {
-                try {
-                  localStorage.removeItem("pitboard_role");
-                } catch (e) {}
-                setRole(null);
-              }}
+              onClick={resetRoleAndCar}
               title="Changer de rôle"
               className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide bg-black/20 text-black"
             >
@@ -2673,7 +2822,7 @@ export default function PitBoard() {
               {role === "admin"
                 ? "Admin"
                 : role === "manager"
-                ? "Team Manager"
+                ? `Team Manager${myCar ? " #" + myCar.numero : ""}`
                 : role === "pitwall"
                 ? "Pit Wall"
                 : "Read Only"}
@@ -2884,8 +3033,75 @@ export default function PitBoard() {
                   />
                   Utiliser le flux live (classement général et tours dans les encarts)
                 </label>
+                <div className="flex flex-col gap-1 text-white text-xs">
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="liveSource"
+                      checked={settings.liveSource !== "page"}
+                      disabled={!canEdit}
+                      onChange={() => pushSettings({ ...settings, liveSource: "direct" })}
+                    />
+                    Lecture directe du flux (nécessite l'autorisation de RIS)
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="liveSource"
+                      checked={settings.liveSource === "page"}
+                      disabled={!canEdit}
+                      onChange={() => pushSettings({ ...settings, liveSource: "page" })}
+                    />
+                    Depuis la page RIS ouverte dans ce navigateur (favori)
+                  </label>
+                </div>
+                {settings.liveSource === "page" && (
+                  <div className="flex flex-col gap-1.5 p-2 rounded bg-white/5 text-white text-xs">
+                    <label className="flex flex-col gap-1">
+                      Adresse de la page RIS
+                      <input
+                        type="text"
+                        value={settings.liveRisUrl || ""}
+                        disabled={!canEdit}
+                        placeholder="https://live.ris-timing.be/funbe"
+                        onChange={(e) => pushSettings({ ...settings, liveRisUrl: e.target.value.trim() })}
+                        className="px-2 py-1.5 text-sm font-mono rounded bg-black/50 text-white placeholder-white/30 border border-white/20 focus:outline-none focus:border-white"
+                      />
+                    </label>
+                    <div className="text-white/70 text-[11px] leading-snug">
+                      <b>Une seule fois :</b> faites glisser le bouton bleu ci-dessous dans votre barre de
+                      favoris (Ctrl+Maj+B pour l'afficher).
+                      <br />
+                      <b>À chaque session :</b> cliquez « Ouvrir la page RIS », puis, dans l'onglet RIS qui
+                      s'ouvre, cliquez sur le favori « PitBoard ↔ RIS ». Un petit message « flux transmis »
+                      apparaît en bas à gauche de la page RIS. Laissez les deux onglets ouverts.
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <button
+                        type="button"
+                        disabled={!canEdit || !(settings.liveRisUrl || "").startsWith(RIS_ORIGIN)}
+                        onClick={() => window.open(settings.liveRisUrl, "pitboard-ris")}
+                        className="px-3 py-1 rounded font-bold text-xs bg-white text-black disabled:opacity-40"
+                        title={`L'adresse doit commencer par ${RIS_ORIGIN}`}
+                      >
+                        Ouvrir la page RIS
+                      </button>
+                      <a
+                        ref={(el) => {
+                          if (el) el.setAttribute("href", buildBookmarklet(window.location.origin));
+                        }}
+                        onClick={(e) => e.preventDefault()}
+                        draggable
+                        className="px-3 py-1 rounded font-bold text-xs bg-blue-600 text-white cursor-grab"
+                        title="Glissez ce bouton dans la barre de favoris"
+                      >
+                        PitBoard ↔ RIS
+                      </a>
+                    </div>
+                  </div>
+                )}
                 <label className="flex flex-col gap-1 text-white text-xs">
-                  uuid du flux
+                  uuid du flux{settings.liveSource === "page" ? " (rempli automatiquement)" : ""}
                   <input
                     type="text"
                     value={settings.liveUuid || ""}
@@ -2911,10 +3127,24 @@ export default function PitBoard() {
                 </p>
                 {isAdmin && settings.liveEnabled && (
                   <div className="text-[10px] font-mono">
-                    {!relayStatus && <span className="text-white/60">Relais : démarrage…</span>}
+                    {!relayStatus && settings.liveSource === "page" && (
+                      <span className="text-white/60">
+                        En attente de la page RIS : ouvrez-la avec le bouton, puis cliquez sur le favori
+                        « PitBoard ↔ RIS ».
+                      </span>
+                    )}
+                    {!relayStatus && settings.liveSource !== "page" && (
+                      <span className="text-white/60">Relais : démarrage…</span>
+                    )}
                     {relayStatus && relayStatus.ok && (
                       <span className="text-green-400">
-                        Relais OK ({relayStatus.via === "proxy" ? "via relais Vercel" : "lecture directe"}) —{" "}
+                        Relais OK (
+                        {relayStatus.via === "page"
+                          ? "via la page RIS"
+                          : relayStatus.via === "proxy"
+                          ? "via relais Vercel"
+                          : "lecture directe"}
+                        ) —{" "}
                         {relayStatus.nCars} voitures · statut {relayStatus.status || "?"} · piste{" "}
                         {relayStatus.trackStateRaw || "(vide)"} · dernière donnée il y a{" "}
                         {Math.max(0, Math.round((now - relayStatus.generatedAt) / 1000))} s
@@ -3149,14 +3379,11 @@ export default function PitBoard() {
             </div>
           ) : (
             <div className="flex flex-col gap-3">
-              {chunkArray(carTiles, 3).map((row, rowIdx) => (
-                <div
-                  key={rowIdx}
-                  className="grid grid-cols-3 gap-3"
-                  style={{ transform: rowIdx % 2 === 1 ? "translateX(22px)" : "none" }}
-                >
-                  {row.map(({ car, call }) => {
+              {(() => {
+                const renderTile = ({ car, call }) => {
                     const expanded = expandedTiles.has(car.id);
+                    // vue récap (admin) : tuile compacte tant qu'elle n'est pas ouverte
+                    const compact = recapView && !expanded;
                     const ds = driverStatsFor(car);
                     const d = call ? deriveCall(call, now) : null;
                     const overMax = d && d.phase === "instand" && d.pitElapsed >= AUTO_REMOVE_AFTER_PIT_SEC - 30;
@@ -3168,14 +3395,19 @@ export default function PitBoard() {
                         ref={(el) => {
                           if (el) tileNodesRef.current[car.id] = el;
                         }}
-                        className="rounded-2xl p-2 shadow-lg transition-shadow"
+                        className={`rounded-2xl shadow-lg transition-shadow ${compact ? "p-1.5" : "p-2"}`}
                         style={{
                           backgroundColor: "#0a0a0a",
                           backgroundImage: `repeating-linear-gradient(45deg, ${car.couleur1} 0px, ${car.couleur1} 14px, rgba(10,10,10,1) 14px, rgba(10,10,10,1) 28px)`,
                           boxShadow: `0 0 0 2.5px ${ringColor}, 0 6px 16px rgba(0,0,0,0.35)`,
+                          gridColumn: recapView && expanded ? "span 2" : undefined,
                         }}
                       >
-                        <div className="rounded-[13px] bg-neutral-900/95 backdrop-blur-sm p-3 flex flex-col gap-2">
+                        <div
+                          className={`rounded-[13px] bg-neutral-900/95 backdrop-blur-sm flex flex-col ${
+                            compact ? "p-2 gap-1" : "p-3 gap-2"
+                          }`}
+                        >
                           {/* EN-TÊTE cliquable : agrandit / réduit l'encart */}
                           <button
                             onClick={() => toggleExpand(car.id)}
@@ -3250,15 +3482,16 @@ export default function PitBoard() {
                               </div>
                             </div>
                           ) : (
-                            !expanded && (
+                            !expanded &&
+                            !recapView && (
                               <div className="text-center text-white/40 text-xs py-2">
                                 Cliquer pour annoncer un arrêt
                               </div>
                             )
                           )}
 
-                          {/* PILOTE DU RELAIS + temps de roulage cumulé (toujours visible) */}
-                          {ds && (
+                          {/* PILOTE DU RELAIS + temps de roulage cumulé (toujours visible, sauf en vue récap) */}
+                          {ds && !compact && (
                             <DriverStrip
                               ds={ds}
                               canEdit={canEdit}
@@ -3614,15 +3847,38 @@ export default function PitBoard() {
                         </div>
                       </div>
                     );
-                  })}
-                </div>
-              ))}
+                };
+                // admin : tableau récapitulatif, toutes les tuiles sur une seule grille compacte
+                if (recapView) {
+                  return (
+                    <div
+                      className="grid gap-2"
+                      style={{ gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))" }}
+                    >
+                      {carTiles.map((t) => renderTile(t))}
+                    </div>
+                  );
+                }
+                // team manager : une seule tuile, centrée
+                if (myCar) {
+                  return <div className="max-w-xl w-full mx-auto">{carTiles.map((t) => renderTile(t))}</div>;
+                }
+                return chunkArray(carTiles, 3).map((row, rowIdx) => (
+                  <div
+                    key={rowIdx}
+                    className="grid grid-cols-3 gap-3"
+                    style={{ transform: rowIdx % 2 === 1 ? "translateX(22px)" : "none" }}
+                  >
+                    {row.map((t) => renderTile(t))}
+                  </div>
+                ));
+              })()}
             </div>
           )}
 
-          {messages.length > 0 && (
+          {visibleMessages.length > 0 && (
             <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 mt-3">
-              {messages.map((m) => (
+              {visibleMessages.map((m) => (
                 <div
                   key={`msg-${m.id}`}
                   className="rounded-2xl p-2 shadow-lg"
@@ -4118,7 +4374,7 @@ export default function PitBoard() {
           {showSetup && (
             <div className="px-3 pb-3">
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                {cars.map((c) => (
+                {cars.filter((c) => role !== "manager" || c.id === myCarId).map((c) => (
                   <div
                     key={c.id}
                     className="rounded-md p-2 border border-white/20"
@@ -4127,7 +4383,7 @@ export default function PitBoard() {
                     }}
                   >
                     <div className="bg-black/60 rounded p-2 flex flex-col gap-1.5 relative">
-                      {c.id > 6 && (
+                      {c.id > 6 && role !== "manager" && (
                         <button
                           onClick={() => removeCarRow(c.id)}
                           className="absolute top-1 right-1 text-white/40 hover:text-white"
@@ -4143,6 +4399,7 @@ export default function PitBoard() {
                         type="text"
                         placeholder="N° voiture"
                         value={c.numero}
+                        disabled={role === "manager"}
                         onFocus={() => (editingSetupRef.current = true)}
                         onBlur={() => (editingSetupRef.current = false)}
                         onChange={(e) => updateCar(c.id, "numero", e.target.value)}
@@ -4242,6 +4499,7 @@ export default function PitBoard() {
                   </div>
                 ))}
               </div>
+              {role !== "manager" && (
               <button
                 type="button"
                 onClick={addCarRow}
@@ -4249,6 +4507,7 @@ export default function PitBoard() {
               >
                 <Plus size={13} /> Ajouter une voiture
               </button>
+              )}
               <p className="text-white/50 text-[10px] mt-2">
                 Astuce : chaque team manager peut renseigner uniquement la ligne de sa propre
                 voiture — les autres restent gérées par leurs collègues, tout se synchronise
