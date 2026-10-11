@@ -621,6 +621,50 @@ function mergeStintEntry(log, entry) {
 
 // champ texte qui n'enregistre qu'en quittant le champ (ou sur Entrée) : pas d'aller-retour
 // avec les autres postes pendant la frappe
+// Vidéo MyRacesLive d'une voiture : lecteur intégré (si la plateforme l'autorise) + lien de secours
+function CarVideo({ url }) {
+  const [open, setOpen] = useState(false);
+  const clean = typeof url === "string" ? url.trim() : "";
+  if (!/^https?:\/\//i.test(clean)) return null;
+  return (
+    <div className="pt-1 border-t border-white/10">
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => setOpen((o) => !o)}
+          className="px-2 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-[11px] font-bold uppercase tracking-wide"
+        >
+          {open ? "Masquer la vidéo" : "▶ Vidéo live"}
+        </button>
+        <a
+          href={clean}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="px-2 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-[11px] font-bold uppercase tracking-wide"
+        >
+          Ouvrir dans un onglet ↗
+        </a>
+      </div>
+      {open && (
+        <div className="mt-2">
+          <div className="relative w-full" style={{ paddingTop: "56.25%" }}>
+            <iframe
+              src={clean}
+              title="Vidéo MyRacesLive"
+              className="absolute inset-0 w-full h-full rounded bg-black"
+              allow="autoplay; fullscreen; picture-in-picture"
+              allowFullScreen
+              referrerPolicy="no-referrer"
+            />
+          </div>
+          <div className="text-[10px] text-white/50 mt-1">
+            Si l'image reste noire, la plateforme refuse l'intégration : utilisez « Ouvrir dans un onglet ».
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DraftInput({ value, onCommit, placeholder, className, disabled }) {
   const [draft, setDraft] = useState(value || "");
   const focusedRef = useRef(false);
@@ -4200,6 +4244,7 @@ export default function PitBoard() {
                               </div>
                             );
                           })()}
+                          {!compact && <CarVideo url={(settings.carVideos || {})[car.id]} />}
                         </div>
                       </div>
                     );
@@ -4831,6 +4876,25 @@ export default function PitBoard() {
                           />
                         </div>
                       )}
+                      <div className="flex items-center gap-2">
+                        <label className="text-white/60 text-[10px] uppercase tracking-widest whitespace-nowrap">
+                          Lien vidéo MyRacesLive
+                        </label>
+                        <input
+                          type="url"
+                          placeholder="https://…"
+                          value={(settings.carVideos || {})[c.id] || ""}
+                          onFocus={() => (editingSetupRef.current = true)}
+                          onBlur={() => (editingSetupRef.current = false)}
+                          onChange={(e) =>
+                            pushSettings({
+                              ...settings,
+                              carVideos: { ...(settings.carVideos || {}), [c.id]: e.target.value.trim() },
+                            })
+                          }
+                          className="flex-1 min-w-0 px-2 py-0.5 text-sm rounded bg-black/50 text-white border border-white/20 focus:outline-none focus:border-white"
+                        />
+                      </div>
                       <div className="flex items-center gap-2">
                         <label className="text-white/60 text-[10px] uppercase tracking-widest">
                           Couleur 1
