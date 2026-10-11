@@ -2,6 +2,21 @@ import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from "re
 import { supabase } from "./lib/supabase";
 import { fetchLiveTiming, parseLiveTiming, normalizeCarNumber } from "./lib/risLive";
 import {
+  MAX_DRIVERS,
+  MIN_DRIVERS,
+  getCfg,
+  driverName,
+  addDriver,
+  updateDriver,
+  moveDriver,
+  resolveRelay,
+  setRelayDriver,
+  freezeRelay,
+  driverHasRelays,
+  driverTotals,
+  resetDriverRelays,
+} from "./lib/drivers";
+import {
   Flag,
   Plus,
   Timer,
@@ -597,6 +612,240 @@ function mergeStintEntry(log, entry) {
   return log.map((x, i) => (i === idx ? merged : x));
 }
 
+// champ texte qui n'enregistre qu'en quittant le champ (ou sur Entrée) : pas d'aller-retour
+// avec les autres postes pendant la frappe
+function DraftInput({ value, onCommit, placeholder, className, disabled }) {
+  const [draft, setDraft] = useState(value || "");
+  const focusedRef = useRef(false);
+  useEffect(() => {
+    if (!focusedRef.current) setDraft(value || "");
+  }, [value]);
+  return (
+    <input
+      type="text"
+      value={draft}
+      placeholder={placeholder}
+      disabled={disabled}
+      className={className}
+      onFocus={() => (focusedRef.current = true)}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => {
+        focusedRef.current = false;
+        if (draft !== (value || "")) onCommit(draft);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") e.currentTarget.blur();
+      }}
+    />
+  );
+}
+
+// bandeau de la tuile : pilote du relais, confirmation, temps de roulage cumulé (vert / jaune)
+function DriverStrip({ ds, canEdit, onSet }) {
+  const [changing, setChanging] = useState(false);
+  const { cfg, n, onTrack, cur, curDriver, prevId, totals } = ds;
+  const tot = curDriver ? totals[curDriver.id] : null;
+  const choices = cfg.list.filter((d) => !d.absent || d.id === cur.id);
+  const btn = "px-2 py-0.5 rounded font-bold text-[10px]";
+  return (
+    <div className="rounded bg-white/5 px-2 py-1.5 flex flex-col gap-1 text-[11px]">
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-black text-white truncate">
+          {curDriver ? driverName(curDriver) || "Pilote sans nom" : "Aucun pilote disponible"}
+        </span>
+        <span className="text-white/50 text-[10px] whitespace-nowrap">
+          Relais {n} {onTrack ? "en cours" : "à venir"}
+        </span>
+      </div>
+      {tot && (
+        <div className="font-mono text-white/80">
+          Roulage {fmtTimeHMS(tot.total)}{" "}
+          <span className="text-white/50">
+            🟢{fmtTimeHMS(tot.vert)} 🟡{fmtTimeHMS(tot.jaune)}
+            {tot.rouge >= 5 && <> 🔴{fmtTimeHMS(tot.rouge)}</>}
+          </span>
+          <span className="text-white/40"> · {tot.relays} relais</span>
+        </div>
+      )}
+      {curDriver && !changing && (
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {cur.confirmed ? (
+            <span className="text-green-400 font-bold">✓ Confirmé</span>
+          ) : (
+            <span className="text-amber-400 font-bold">Pilote prévu, à confirmer</span>
+          )}
+          {canEdit && !cur.confirmed && (
+            <button
+              type="button"
+              onClick={() => onSet(n, cur.id)}
+              className={`${btn} bg-green-600 text-white`}
+            >
+              Confirmer
+            </button>
+          )}
+          {canEdit && (
+            <button type="button" onClick={() => setChanging(true)} className={`${btn} bg-white/15 text-white`}>
+              Changer
+            </button>
+          )}
+        </div>
+      )}
+      {changing && (
+        <div className="flex items-center gap-1.5">
+          <select
+            autoFocus
+            value=""
+            onChange={(e) => {
+              if (e.target.value) onSet(n, e.target.value);
+              setChanging(false);
+            }}
+            className="flex-1 min-w-0 px-1 py-0.5 text-[11px] rounded bg-black/60 text-white border border-white/30"
+          >
+            <option value="">Pilote du relais {n}…</option>
+            {choices.map((d) => (
+              <option key={d.id} value={d.id}>
+                {driverName(d) || "Pilote sans nom"}
+                {d.id === prevId ? " (double relais)" : ""}
+              </option>
+            ))}
+          </select>
+          <button type="button" onClick={() => setChanging(false)} className={`${btn} bg-white/15 text-white`}>
+            Annuler
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// configuration des pilotes d'une voiture (carte "Configuration des voitures")
+function DriversEditor({ cfg, currentN, drivenN, canEdit, onChange }) {
+  const inputCls =
+    "min-w-0 flex-1 px-2 py-1 text-sm rounded bg-black/50 text-white placeholder-white/40 border border-white/20 focus:outline-none focus:border-white disabled:opacity-50";
+  const smallBtn =
+    "px-1.5 py-0.5 rounded text-[11px] font-bold bg-white/15 text-white disabled:opacity-30";
+  const relayNumbers = Array.from({ length: currentN }, (_, i) => currentN - i); // le plus récent en haut
+  return (
+    <div className="flex flex-col gap-1.5 border-t border-white/15 pt-1.5">
+      <div className="text-white/60 text-[10px] uppercase tracking-widest font-semibold">
+        Pilotes ({cfg.list.length}/{MAX_DRIVERS}) — dans l'ordre de passage
+      </div>
+      {cfg.list.length === 1 && (
+        <div className="text-amber-400 text-[10px]">Renseignez au moins {MIN_DRIVERS} pilotes.</div>
+      )}
+      {cfg.list.map((d, i) => {
+        const locked = driverHasRelays(cfg, drivenN, d.id);
+        return (
+          <div key={d.id} className="flex flex-col gap-1 rounded bg-white/5 p-1.5">
+            <div className="flex items-center gap-1">
+              <span className="text-white/50 text-[11px] w-4 text-right">{i + 1}</span>
+              <DraftInput
+                value={d.prenom}
+                placeholder="Prénom"
+                disabled={!canEdit}
+                className={inputCls}
+                onCommit={(v) => onChange(updateDriver(cfg, d.id, { prenom: v.trim() }))}
+              />
+              <DraftInput
+                value={d.nom}
+                placeholder="Nom"
+                disabled={!canEdit}
+                className={inputCls}
+                onCommit={(v) => onChange(updateDriver(cfg, d.id, { nom: v.trim() }))}
+              />
+            </div>
+            <div className="flex items-center gap-1.5 pl-5 flex-wrap">
+              <button
+                type="button"
+                disabled={!canEdit || i === 0}
+                onClick={() => onChange(moveDriver(cfg, d.id, -1))}
+                className={smallBtn}
+                title="Passer plus tôt dans l'ordre"
+              >
+                ↑
+              </button>
+              <button
+                type="button"
+                disabled={!canEdit || i === cfg.list.length - 1}
+                onClick={() => onChange(moveDriver(cfg, d.id, 1))}
+                className={smallBtn}
+                title="Passer plus tard dans l'ordre"
+              >
+                ↓
+              </button>
+              <label
+                className="flex items-center gap-1 text-white/70 text-[11px]"
+                title="Malade, blessé… : il est sauté dans l'ordre de passage"
+              >
+                <input
+                  type="checkbox"
+                  disabled={!canEdit}
+                  checked={!!d.absent}
+                  onChange={(e) => onChange(updateDriver(cfg, d.id, { absent: e.target.checked }))}
+                />
+                Indisponible
+              </label>
+              <button
+                type="button"
+                disabled={!canEdit || locked}
+                onClick={() => onChange({ ...cfg, list: cfg.list.filter((x) => x.id !== d.id) })}
+                className={`${smallBtn} ml-auto`}
+                title={locked ? "A déjà roulé : marquez-le indisponible plutôt que le supprimer" : "Supprimer ce pilote"}
+              >
+                <X size={11} />
+              </button>
+            </div>
+          </div>
+        );
+      })}
+      {cfg.list.length < MAX_DRIVERS && (
+        <button
+          type="button"
+          disabled={!canEdit}
+          onClick={() => onChange(addDriver(cfg))}
+          className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-bold bg-white/15 text-white self-start disabled:opacity-40"
+        >
+          <Plus size={11} /> Ajouter un pilote
+        </button>
+      )}
+      {cfg.list.length > 0 && (
+        <>
+          <div className="text-white/60 text-[10px] uppercase tracking-widest font-semibold mt-1">
+            Pilote de chaque relais
+          </div>
+          <div className="flex flex-col gap-1 max-h-40 overflow-y-auto pr-1">
+            {relayNumbers.map((n) => {
+              const r = resolveRelay(cfg, n);
+              return (
+                <div key={n} className="flex items-center gap-1.5 text-[11px] text-white/80">
+                  <span className="w-14 shrink-0">Relais {n}</span>
+                  <select
+                    disabled={!canEdit}
+                    value={r.id || ""}
+                    onChange={(e) => e.target.value && onChange(setRelayDriver(cfg, n, e.target.value))}
+                    className="flex-1 min-w-0 px-1 py-0.5 rounded bg-black/60 text-white border border-white/30 disabled:opacity-50"
+                  >
+                    {!r.id && <option value="">—</option>}
+                    {cfg.list.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {driverName(d) || "Pilote sans nom"}
+                        {d.absent ? " (indisp.)" : ""}
+                      </option>
+                    ))}
+                  </select>
+                  <span className={r.confirmed ? "text-green-400" : "text-amber-400"} title={r.confirmed ? "Confirmé" : "Prévu, à confirmer"}>
+                    {r.confirmed ? "✓" : "?"}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function PitBoard() {
   // code d'accès partagé (avant même le choix du rôle) : empêche qu'une personne tombe
   // sur le lien "par hasard" ou le partage sans réfléchir. Configuré via VITE_ACCESS_CODE
@@ -689,8 +938,10 @@ export default function PitBoard() {
     liveEnabled: false, // flux RIS Live Timing (classement, tours) relayé par un poste Admin
     liveUuid: "", // uuid du flux RIS (change à chaque événement)
     liveFlagAuto: false, // drapeaux vert/jaune pilotés par le flux (le rouge reste manuel)
+    drivers: {}, // pilotes par voiture : { [idVoiture]: { list, relays } } (voir lib/drivers.js)
   });
   const [showSettings, setShowSettings] = useState(false);
+  const [openDriverCars, setOpenDriverCars] = useState(() => new Set()); // voitures dont l'éditeur de pilotes est ouvert
   // dernier flux reçu via Supabase (écrit par le poste Admin relais) et état du relais local
   const [liveRow, setLiveRow] = useState(null); // { seq, generatedAt, fetchedAt, uuid, status, trackStateRaw, cars }
   const [relayStatus, setRelayStatus] = useState(null); // seulement sur le poste Admin qui relaie
@@ -1354,6 +1605,7 @@ export default function PitBoard() {
 
   // réglages globaux : une seule ligne, simple update
   async function pushSettings(next) {
+    settingsRef.current = next; // à jour tout de suite, avant même le prochain rendu
     setSettings(next);
     try {
       await supabase.from("app_settings").update({ data: next, updated_at: new Date().toISOString() }).eq("id", 1);
@@ -1468,7 +1720,13 @@ export default function PitBoard() {
     setFlag("vert");
     lastKnownFlagRef.current = "vert";
     flagTsRef.current = nowMs;
-    pushSettings({ ...settings, eventStartAt: "", eventDurationSec: 0 });
+    // les pilotes et leur ordre sont conservés, seuls les relais confirmés sont effacés
+    pushSettings({
+      ...settings,
+      eventStartAt: "",
+      eventDurationSec: 0,
+      drivers: resetDriverRelays(settings.drivers),
+    });
     setExpandedTiles(new Set());
     setConfirmExitId(null);
     setTechCarId("");
@@ -1485,6 +1743,7 @@ export default function PitBoard() {
         "Team manager",
         "Classement",
         "Relais n°",
+        "Pilote du relais",
         "Durée relais",
         "Tours",
         "Temps vert",
@@ -1511,18 +1770,21 @@ export default function PitBoard() {
           car.team || "",
           car.pilote || "",
           rankOf(car) || "",
-          "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+          "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
         ]);
         return;
       }
+      const dcfg = getCfg(settings.drivers, car.id);
       log.forEach((r, i) => {
         const t = tech[i] || {};
+        const rd = dcfg.list.find((d) => d.id === resolveRelay(dcfg, r.n).id);
         rows.push([
           car.numero,
           car.team || "",
           car.pilote || "",
           rankOf(car) || "",
           r.n,
+          driverName(rd),
           fmtTimeHMS(r.durationSec),
           r.laps || "",
           fmtTimeHMS(r.vertSec || 0),
@@ -1744,7 +2006,52 @@ export default function PitBoard() {
         },
       ];
       pushStints({ ...stintsRef.current, [carId]: { lastExitAt: null, log: newLog } });
+      // fige le pilote (prévu ou confirmé) du relais qui vient de se terminer
+      const cfg = getCfg(settingsRef.current.drivers, carId);
+      const frozen = freezeRelay(cfg, st.log.length + 1);
+      if (frozen !== cfg) pushDriversCfg(carId, frozen);
     }
+  }
+
+  // pilotes : une seule écriture dans les réglages partagés (pas de table supplémentaire)
+  function pushDriversCfg(carId, cfg) {
+    const cur = settingsRef.current;
+    pushSettings({ ...cur, drivers: { ...(cur.drivers || {}), [carId]: cfg } });
+  }
+
+  function confirmRelayDriver(carId, n, driverId) {
+    pushDriversCfg(carId, setRelayDriver(getCfg(settingsRef.current.drivers, carId), n, driverId));
+  }
+
+  // état des pilotes d'une voiture à l'instant "now" : pilote du relais en cours (ou à venir) et
+  // temps de roulage cumulé par pilote ; null si aucun pilote n'est encodé pour cette voiture
+  function driverStatsFor(car) {
+    const cfg = getCfg(settings.drivers, car.id);
+    if (cfg.list.length === 0) return null;
+    const st = stints[car.id] || { lastExitAt: null, log: [] };
+    const log = st.log || [];
+    const n = log.length + 1;
+    let current = null;
+    if (st.lastExitAt) {
+      const split = computeFlagSplit(st.lastExitAt, now, flagHistory);
+      current = {
+        n,
+        durationSec: Math.max(0, (now - st.lastExitAt) / 1000),
+        vertSec: split.vertSec,
+        jauneSec: split.jauneSec,
+      };
+    }
+    const cur = resolveRelay(cfg, n);
+    return {
+      cfg,
+      n,
+      onTrack: !!st.lastExitAt,
+      drivenN: log.length + (st.lastExitAt ? 1 : 0),
+      cur,
+      curDriver: cfg.list.find((d) => d.id === cur.id) || null,
+      prevId: n > 1 ? resolveRelay(cfg, n - 1).id : null,
+      totals: driverTotals(cfg, log, current),
+    };
   }
 
   function logStintExit(carId, idleSec) {
@@ -2850,6 +3157,7 @@ export default function PitBoard() {
                 >
                   {row.map(({ car, call }) => {
                     const expanded = expandedTiles.has(car.id);
+                    const ds = driverStatsFor(car);
                     const d = call ? deriveCall(call, now) : null;
                     const overMax = d && d.phase === "instand" && d.pitElapsed >= AUTO_REMOVE_AFTER_PIT_SEC - 30;
                     const nearEnd = d && d.phase === "countdown" && d.remaining <= 30 && d.remaining > 0;
@@ -2886,6 +3194,16 @@ export default function PitBoard() {
                               </div>
                               {car.pilote && (
                                 <div className="text-white/50 text-[11px] mt-0.5 truncate">{car.pilote}</div>
+                              )}
+                              {ds && ds.curDriver && (
+                                <div className="text-sm font-black text-white mt-0.5 truncate">
+                                  {driverName(ds.curDriver) || "Pilote sans nom"}
+                                  {!ds.cur.confirmed && (
+                                    <span className="text-amber-400" title="Pilote prévu, à confirmer">
+                                      {" "}?
+                                    </span>
+                                  )}
+                                </div>
                               )}
                               {(() => {
                                 const live = liveFor(car);
@@ -2939,9 +3257,49 @@ export default function PitBoard() {
                             )
                           )}
 
+                          {/* PILOTE DU RELAIS + temps de roulage cumulé (toujours visible) */}
+                          {ds && (
+                            <DriverStrip
+                              ds={ds}
+                              canEdit={canEdit}
+                              onSet={(n, driverId) => confirmRelayDriver(car.id, n, driverId)}
+                            />
+                          )}
+
                           {/* CONTENU AGRANDI */}
                           {expanded && (
                             <div className="flex flex-col gap-2 pt-1 border-t border-white/10">
+                              {/* TEMPS DE ROULAGE PAR PILOTE */}
+                              {ds && (
+                                <div className="text-[10px] text-white/70 flex flex-col gap-0.5">
+                                  <div className="text-white/50 uppercase tracking-widest font-bold text-[9px]">
+                                    Temps de roulage par pilote
+                                  </div>
+                                  {ds.cfg.list.map((p) => {
+                                    const t = ds.totals[p.id];
+                                    const isCur = ds.curDriver && ds.curDriver.id === p.id;
+                                    return (
+                                      <div
+                                        key={p.id}
+                                        className={`flex items-center justify-between gap-2 font-mono ${
+                                          isCur ? "text-white font-bold" : ""
+                                        } ${p.absent ? "opacity-50" : ""}`}
+                                      >
+                                        <span className="truncate font-sans">
+                                          {driverName(p) || "Pilote sans nom"}
+                                          {p.absent ? " (indisp.)" : ""}
+                                        </span>
+                                        <span className="whitespace-nowrap">
+                                          {fmtTimeHMS(t.total)}{" "}
+                                          <span className="text-white/50">
+                                            🟢{fmtTimeHMS(t.vert)} 🟡{fmtTimeHMS(t.jaune)} · {t.relays} rel.
+                                          </span>
+                                        </span>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
                               {/* CLASSEMENT GÉNÉRAL : éditable directement dans l'encart */}
                               <div className="flex items-center gap-2">
                                 <label className="text-white/60 text-[10px] uppercase tracking-widest whitespace-nowrap">
@@ -3808,6 +4166,41 @@ export default function PitBoard() {
                         onChange={(e) => updateCar(c.id, "team", e.target.value)}
                         className="w-full px-2 py-1 text-sm rounded bg-black/50 text-white placeholder-white/40 border border-white/20 focus:outline-none focus:border-white"
                       />
+                      {(() => {
+                        const dcfg = getCfg(settings.drivers, c.id);
+                        const st = stints[c.id] || { lastExitAt: null, log: [] };
+                        const open = openDriverCars.has(c.id);
+                        return (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setOpenDriverCars((prev) => {
+                                  const next = new Set(prev);
+                                  if (next.has(c.id)) next.delete(c.id);
+                                  else next.add(c.id);
+                                  return next;
+                                })
+                              }
+                              className="flex items-center justify-between px-2 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-xs font-bold"
+                            >
+                              <span>
+                                Pilotes et ordre des relais ({dcfg.list.length}/{MAX_DRIVERS})
+                              </span>
+                              <span className="text-white/60">{open ? "▲" : "▼"}</span>
+                            </button>
+                            {open && (
+                              <DriversEditor
+                                cfg={dcfg}
+                                currentN={(st.log || []).length + 1}
+                                drivenN={(st.log || []).length + (st.lastExitAt ? 1 : 0)}
+                                canEdit={canEdit}
+                                onChange={(next) => pushDriversCfg(c.id, next)}
+                              />
+                            )}
+                          </>
+                        );
+                      })()}
                       {settings.eventType === "course" && (
                         <div className="flex items-center gap-2">
                           <label className="text-white/60 text-[10px] uppercase tracking-widest whitespace-nowrap">
