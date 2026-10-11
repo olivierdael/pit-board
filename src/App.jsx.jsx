@@ -16,7 +16,13 @@ import {
   driverHasRelays,
   driverTotals,
   resetDriverRelays,
+  setEndLap,
+  endLapOf,
+  relayLapsFromEnds,
+  observeLap,
+  mergeBest,
 } from "./lib/drivers";
+import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow } from "./lib/liveView";
 import {
   Flag,
   Plus,
@@ -641,6 +647,93 @@ function DraftInput({ value, onCommit, placeholder, className, disabled }) {
   );
 }
 
+// bloc "live" d'une tuile : temps de course, tour, intermédiaires, puis (si showTable) le classement
+// avec les 3 voitures devant et les 3 derrière, leurs intermédiaires et leur écart avec nous
+function LiveBlock({ info, live, num, now, showTable }) {
+  if (!live) return null;
+  const clock = clockNow(info, now);
+  const nb = showTable ? neighborsOf(info.cars, num, 3) : null;
+  const sec = (v, b) => (
+    <span className={v != null && b != null && v <= b ? "text-green-400 font-bold" : "text-white"}>{fmtMs(v)}</span>
+  );
+  const gapTxt = (r) =>
+    !r.gap ? "–" : r.gap.laps ? `${r.gap.laps} tr` : fmtGapMs(r.gap.ms);
+  const rowCls = "grid items-center gap-x-1.5 font-mono text-[10px]";
+  const cols = { gridTemplateColumns: "2.2rem 1fr 2.6rem 2.6rem 2.6rem 3.4rem" };
+  const line = (r, me) => (
+    <div
+      key={r.num}
+      className={`${rowCls} px-1 py-0.5 ${me ? "bg-white/15 rounded font-black text-white" : "text-white/80"}`}
+      style={cols}
+    >
+      <span>P{r.pos}</span>
+      <span className="truncate font-sans">
+        #{r.num} {r.team}
+      </span>
+      <span>{fmtSec1(r.s1)}</span>
+      <span>{fmtSec1(r.s2)}</span>
+      <span>{fmtSec1(r.s3)}</span>
+      <span className="text-right">
+        {me ? "" : (r.ahead ? "▲ " : "▼ ") + gapTxt(r)}
+      </span>
+    </div>
+  );
+  return (
+    <div className="rounded bg-black/40 px-2 py-1.5 flex flex-col gap-1 text-[10px] font-mono text-white/80">
+      {clock && (
+        <div className="flex items-center justify-between gap-2">
+          <span>
+            ⏱ Écoulé <b className="text-white">{clock.elapsedSec != null ? fmtTimeHMS(clock.elapsedSec) : "–"}</b>
+          </span>
+          <span>
+            Restant <b className="text-white">{clock.remainingSec != null ? fmtTimeHMS(clock.remainingSec) : "–"}</b>
+          </span>
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
+        <span>
+          P<b className="text-white">{live.pos || "-"}</b>
+          {nb ? `/${nb.total}` : ""}
+        </span>
+        {live.laps != null && (
+          <span>
+            Tour <b className="text-white">{live.laps}</b>
+          </span>
+        )}
+        <span>Dernier {fmtMs(live.last)}</span>
+        <span>Meilleur {fmtMs(live.best)}</span>
+        {live.pits != null && <span>Arrêts {live.pits}</span>}
+      </div>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
+        <span>
+          S1 {sec(live.s1, live.s1b)} <span className="text-white/40">({fmtMs(live.s1b)})</span>
+        </span>
+        <span>
+          S2 {sec(live.s2, live.s2b)} <span className="text-white/40">({fmtMs(live.s2b)})</span>
+        </span>
+        <span>
+          S3 {sec(live.s3, live.s3b)} <span className="text-white/40">({fmtMs(live.s3b)})</span>
+        </span>
+      </div>
+      {nb && (
+        <div className="flex flex-col gap-0.5 pt-1 border-t border-white/10">
+          <div className={`${rowCls} px-1 text-white/40 uppercase text-[9px]`} style={cols}>
+            <span>Pos</span>
+            <span>Voiture</span>
+            <span>S1</span>
+            <span>S2</span>
+            <span>S3</span>
+            <span className="text-right">Écart</span>
+          </div>
+          {nb.above.map((r) => line(r, false))}
+          {line({ ...nb.me, num, ahead: false }, true)}
+          {nb.below.map((r) => line(r, false))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // bandeau de la tuile : pilote du relais, confirmation, temps de roulage cumulé (vert / jaune)
 function DriverStrip({ ds, canEdit, onSet }) {
   const [changing, setChanging] = useState(false);
@@ -1096,6 +1189,9 @@ export default function PitBoard() {
       feedAgeSec,
       status: liveRow.status || "",
       trackStateRaw: liveRow.trackStateRaw,
+      generatedAt: liveRow.generatedAt,
+      elapsedMs: liveRow.elapsedMs == null ? null : liveRow.elapsedMs,
+      remainingMs: liveRow.remainingMs == null ? null : liveRow.remainingMs,
     };
   }, [settings.liveEnabled, settings.liveUuid, liveRow, now]);
 
@@ -1500,6 +1596,37 @@ export default function PitBoard() {
       if (pushFlagRef.current) pushFlagRef.current(live.flag);
     }
 
+    // meilleurs intermédiaires / meilleur tour PAR PILOTE : chaque valeur nouvelle du flux est
+    // attribuée au pilote du relais en cours (le pilote prévu ou confirmé dans PitBoard).
+    // Seul le poste Admin qui relaie le flux les enregistre (une écriture seulement si un record tombe).
+    const seenByCar = {};
+    function recordBests(live) {
+      let drivers = settingsRef.current.drivers || {};
+      let changed = false;
+      carsRef.current.forEach((car) => {
+        const lc = live.cars[normalizeCarNumber(car.numero)];
+        if (!lc) return;
+        const cfg = getCfg(drivers, car.id);
+        if (cfg.list.length === 0) return;
+        const st = stintsRef.current[car.id] || { lastExitAt: null, log: [] };
+        const logN = (st.log || []).length;
+        // en piste : relais en cours ; au stand : le relais qui vient de se terminer
+        const relayN = st.lastExitAt ? logN + 1 : logN;
+        const driverId = relayN >= 1 ? resolveRelay(cfg, relayN).id : null;
+        const first = !seenByCar[car.id];
+        const { seen, obs } = observeLap(seenByCar[car.id], lc);
+        seenByCar[car.id] = seen;
+        if (first || !driverId) return; // premier flux : on mémorise seulement
+        const cur = cfg.best[driverId];
+        const nb = mergeBest(cur, obs);
+        if (nb !== cur) {
+          drivers = { ...drivers, [car.id]: { ...cfg, best: { ...cfg.best, [driverId]: nb } } };
+          changed = true;
+        }
+      });
+      if (changed) pushSettings({ ...settingsRef.current, drivers });
+    }
+
     // traite un flux reçu (lecture directe ou page RIS) : l'écrit dans Supabase pour tous les
     // postes, applique les drapeaux automatiques et met à jour l'état du relais
     async function ingest(raw, via, srcUuid) {
@@ -1516,6 +1643,8 @@ export default function PitBoard() {
             fetchedAt: nowMs,
             status: live.status,
             trackStateRaw: live.trackStateRaw,
+            elapsedMs: live.elapsedMs,
+            remainingMs: live.remainingMs,
             cars: live.cars,
           };
           const { error } = await supabase
@@ -1528,6 +1657,9 @@ export default function PitBoard() {
           }
         }
         applyAutoFlag(live, nowMs);
+        try {
+          recordBests(live);
+        } catch (e) {}
         if (!stopped) {
           setRelayStatus({
             ok: !writeError,
@@ -2096,12 +2228,23 @@ export default function PitBoard() {
       const nowMs = Date.now();
       const durationSec = Math.round((nowMs - st.lastExitAt) / 1000);
       const { vertSec, jauneSec } = computeFlagSplit(st.lastExitAt, nowMs, flagHistoryRef.current);
+      // tours du relais = tour atteint maintenant - tour atteint à la fin du relais précédent (flux live)
+      const relayN = st.log.length + 1;
+      const carObj = carsRef.current.find((c) => c.id === carId);
+      const lv = carObj ? liveFor(carObj) : null;
+      const cfgOrig = getCfg(settingsRef.current.drivers, carId);
+      let cfg0 = cfgOrig;
+      let autoLaps = null;
+      if (lv && lv.laps != null) {
+        cfg0 = setEndLap(cfg0, relayN, lv.laps);
+        autoLaps = relayLapsFromEnds(cfg0, relayN);
+      }
       const newLog = [
         ...st.log,
         {
-          n: st.log.length + 1,
+          n: relayN,
           durationSec,
-          laps: "",
+          laps: autoLaps != null ? autoLaps : "",
           vertSec: Math.round(vertSec),
           jauneSec: Math.round(jauneSec),
           refueled: !!refueled,
@@ -2109,9 +2252,8 @@ export default function PitBoard() {
       ];
       pushStints({ ...stintsRef.current, [carId]: { lastExitAt: null, log: newLog } });
       // fige le pilote (prévu ou confirmé) du relais qui vient de se terminer
-      const cfg = getCfg(settingsRef.current.drivers, carId);
-      const frozen = freezeRelay(cfg, st.log.length + 1);
-      if (frozen !== cfg) pushDriversCfg(carId, frozen);
+      const frozen = freezeRelay(cfg0, relayN);
+      if (frozen !== cfgOrig) pushDriversCfg(carId, frozen);
     }
   }
 
@@ -2136,11 +2278,14 @@ export default function PitBoard() {
     let current = null;
     if (st.lastExitAt) {
       const split = computeFlagSplit(st.lastExitAt, now, flagHistory);
+      const lvNow = liveFor(car);
+      const prevEnd = endLapOf(cfg, n - 1);
       current = {
         n,
         durationSec: Math.max(0, (now - st.lastExitAt) / 1000),
         vertSec: split.vertSec,
         jauneSec: split.jauneSec,
+        laps: lvNow && lvNow.laps != null && prevEnd != null ? Math.max(0, lvNow.laps - prevEnd) : 0,
       };
     }
     const cur = resolveRelay(cfg, n);
@@ -3543,6 +3688,17 @@ export default function PitBoard() {
                             />
                           )}
 
+                          {/* LIVE RIS : temps de course, intermédiaires, voisins au classement */}
+                          {!compact && liveInfo && liveInfo.relayAlive && liveFor(car) && (
+                            <LiveBlock
+                              info={liveInfo}
+                              live={liveFor(car)}
+                              num={normalizeCarNumber(car.numero)}
+                              now={now}
+                              showTable={expanded || !!myCar}
+                            />
+                          )}
+
                           {/* CONTENU AGRANDI */}
                           {expanded && (
                             <div className="flex flex-col gap-2 pt-1 border-t border-white/10">
@@ -3555,9 +3711,10 @@ export default function PitBoard() {
                                   {ds.cfg.list.map((p) => {
                                     const t = ds.totals[p.id];
                                     const isCur = ds.curDriver && ds.curDriver.id === p.id;
+                                    const bst = ds.cfg.best[p.id];
                                     return (
+                                      <div key={p.id} className="flex flex-col">
                                       <div
-                                        key={p.id}
                                         className={`flex items-center justify-between gap-2 font-mono ${
                                           isCur ? "text-white font-bold" : ""
                                         } ${p.absent ? "opacity-50" : ""}`}
@@ -3569,9 +3726,15 @@ export default function PitBoard() {
                                         <span className="whitespace-nowrap">
                                           {fmtTimeHMS(t.total)}{" "}
                                           <span className="text-white/50">
-                                            🟢{fmtTimeHMS(t.vert)} 🟡{fmtTimeHMS(t.jaune)} · {t.relays} rel.
+                                            🟢{fmtTimeHMS(t.vert)} 🟡{fmtTimeHMS(t.jaune)} · {t.relays} rel. · {t.laps} tr
                                           </span>
                                         </span>
+                                      </div>
+                                      {bst && (bst.lap || bst.s1 || bst.s2 || bst.s3) && (
+                                        <div className="font-mono text-[9px] text-white/50 pl-2">
+                                          Meilleur tour {fmtMs(bst.lap)} · S1 {fmtMs(bst.s1)} · S2 {fmtMs(bst.s2)} · S3 {fmtMs(bst.s3)}
+                                        </div>
+                                      )}
                                       </div>
                                     );
                                   })}

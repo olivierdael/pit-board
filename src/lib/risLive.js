@@ -64,6 +64,12 @@ function asPositiveInt(v) {
   const n = Number(v);
   return Number.isInteger(n) && n > 0 ? n : null;
 }
+// durée en millisecondes : nombre fini >= 0, sinon null
+function asMs(v) {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
 function asNonNegativeInt(v) {
   const n = Number(v);
   return Number.isInteger(n) && n >= 0 ? n : null;
@@ -78,13 +84,36 @@ export function parseLiveTiming(raw) {
   raw.cars.forEach((c) => {
     const num = normalizeCarNumber(c && c.car_number);
     if (!num) return;
+    const lap = (c && c.lap) || {};
+    const gl = (c.gaps && c.gaps.toLeader) || {};
+    const ia = (c.ints && c.ints.toAhead) || {};
+    const stops = c.stops || {};
     cars[num] = {
       pos: asPositiveInt(c.position),
-      laps: asNonNegativeInt(c.lap && c.lap.lap_number),
+      laps: asNonNegativeInt(lap.lap_number),
+      // détails (tous optionnels : null si absents du flux)
+      team: typeof c.team === "string" ? c.team : "",
+      driver: typeof c.driver === "string" ? c.driver : "",
+      cat: typeof c.category === "string" ? c.category : "",
+      state: typeof lap.car_state === "string" ? lap.car_state : "",
+      s1: asMs(lap.s1_ms),
+      s2: asMs(lap.s2_ms),
+      s3: asMs(lap.s3_ms),
+      s1b: asMs(lap.s1_best_ms),
+      s2b: asMs(lap.s2_best_ms),
+      s3b: asMs(lap.s3_best_ms),
+      best: asMs(lap.best_lap_ms),
+      last: asMs(lap.lap_time_ms),
+      gl: asMs(gl.ms), // écart au leader (ms)
+      gll: asNonNegativeInt(gl.laps), // tours de retard sur le leader
+      ia: asMs(ia.ms), // écart avec la voiture devant (ms)
+      ial: asNonNegativeInt(ia.laps),
+      pits: asNonNegativeInt(stops.count),
     };
   });
 
   const session = (raw.context && raw.context.session) || {};
+  const clock = session.clock || {};
   let generatedAt = Date.parse(raw.generated_at);
   if (!Number.isFinite(generatedAt)) generatedAt = Number.isFinite(Number(raw.seq)) ? Number(raw.seq) : 0;
 
@@ -94,6 +123,8 @@ export function parseLiveTiming(raw) {
     status: typeof session.status === "string" ? session.status : "",
     trackStateRaw: typeof session.track_state === "string" ? session.track_state : null,
     flag: normalizeTrackState(session.track_state),
+    elapsedMs: asMs(clock.elapsed_ms),
+    remainingMs: asMs(clock.remaining_ms),
     cars,
   };
 }

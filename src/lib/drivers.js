@@ -5,6 +5,8 @@
 //     [idVoiture]: {
 //       list:   [{ id, prenom, nom, absent }]   // l'ordre de la liste = l'ordre de passage
 //       relays: { "1": { d: idPilote, ok: true|false } }   // pilote retenu pour le relais n
+//       ,best:    { [idPilote]: { s1, s2, s3, lap } }  // meilleurs temps en ms (flux live)
+//       ,endLaps: { "1": 28, "2": 50 }               // tour atteint à la fin de chaque relais
 //     }
 //   }
 // "ok: true" = confirmé par le team manager ; "ok: false" = pilote seulement prévu.
@@ -21,6 +23,8 @@ export function getCfg(drivers, carId) {
   return {
     list: c && Array.isArray(c.list) ? c.list : [],
     relays: c && c.relays && typeof c.relays === "object" ? c.relays : {},
+    best: c && c.best && typeof c.best === "object" ? c.best : {}, // meilleurs temps par pilote (ms)
+    endLaps: c && c.endLaps && typeof c.endLaps === "object" ? c.endLaps : {}, // n° de tour à la fin de chaque relais
   };
 }
 
@@ -113,7 +117,7 @@ export function driverHasRelays(cfg, upToN, id) {
 export function driverTotals(cfg, log, current) {
   const t = {};
   cfg.list.forEach((d) => {
-    t[d.id] = { total: 0, vert: 0, jaune: 0, rouge: 0, relays: 0 };
+    t[d.id] = { total: 0, vert: 0, jaune: 0, rouge: 0, relays: 0, laps: 0 };
   });
   const add = (r) => {
     const id = resolveRelay(cfg, r.n).id;
@@ -122,6 +126,7 @@ export function driverTotals(cfg, log, current) {
     t[id].vert += Number(r.vertSec) || 0;
     t[id].jaune += Number(r.jauneSec) || 0;
     t[id].relays += 1;
+    t[id].laps += Number(r.laps) || 0;
   };
   (log || []).forEach(add);
   if (current) add(current);
@@ -135,7 +140,61 @@ export function driverTotals(cfg, log, current) {
 export function resetDriverRelays(drivers) {
   const out = {};
   Object.keys(drivers || {}).forEach((carId) => {
-    out[carId] = { ...drivers[carId], relays: {} };
+    out[carId] = { ...drivers[carId], relays: {}, best: {}, endLaps: {} };
+  });
+  return out;
+}
+
+// ---- tours par relais (flux live) ----
+// à la fin du relais n, on note le tour atteint ; tours du relais = fin n - fin (n-1)
+export function setEndLap(cfg, n, lap) {
+  return { ...cfg, endLaps: { ...cfg.endLaps, [n]: lap } };
+}
+export function endLapOf(cfg, n) {
+  if (n <= 0) return 0;
+  const v = cfg.endLaps[n];
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+// tours du relais n (terminé) ; null si une des deux bornes est inconnue
+export function relayLapsFromEnds(cfg, n) {
+  const end = endLapOf(cfg, n);
+  const prev = endLapOf(cfg, n - 1);
+  if (end == null || prev == null || end < prev) return null;
+  return end - prev;
+}
+
+// ---- meilleurs temps par pilote ----
+// seen = dernières valeurs vues pour la voiture ({s1,s2,s3,last}) ; c = voiture du flux.
+// -> { seen, obs } où obs contient les valeurs NOUVELLES (apparues depuis le dernier flux).
+export function observeLap(seen, c) {
+  const prev = seen || { s1: null, s2: null, s3: null, last: null };
+  const next = { ...prev };
+  const obs = {};
+  [
+    ["s1", "s1"],
+    ["s2", "s2"],
+    ["s3", "s3"],
+    ["last", "lap"],
+  ].forEach(([from, to]) => {
+    const v = c[from];
+    if (v == null) return;
+    if (v !== prev[from]) obs[to] = v;
+    next[from] = v;
+  });
+  return { seen: next, obs };
+}
+
+// garde le meilleur : renvoie le même objet s'il n'y a aucune amélioration
+export function mergeBest(best, obs) {
+  const cur = best || {};
+  let out = cur;
+  ["s1", "s2", "s3", "lap"].forEach((k) => {
+    const v = obs[k];
+    if (typeof v !== "number" || !(v > 0)) return;
+    if (cur[k] == null || v < cur[k]) {
+      if (out === cur) out = { ...cur };
+      out[k] = v;
+    }
   });
   return out;
 }
