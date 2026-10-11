@@ -649,12 +649,17 @@ function DraftInput({ value, onCommit, placeholder, className, disabled }) {
 
 // bloc "live" d'une tuile : temps de course, tour, intermédiaires, puis (si showTable) le classement
 // avec les 3 voitures devant et les 3 derrière, leurs intermédiaires et leur écart avec nous
-function LiveBlock({ info, live, num, now, showTable }) {
+function LiveBlock({ info, live, num, now, showTable, driverBest }) {
   if (!live) return null;
   const clock = clockNow(info, now);
   const nb = showTable ? neighborsOf(info.cars, num, 3) : null;
+  const BLUE = "#4da3ff"; // meilleurs temps et intermédiaires
+  const GREEN = "#39ff14"; // notre voiture
+  const isBest = (v, b) => v != null && b != null && v <= b;
   const sec = (v, b) => (
-    <span className={v != null && b != null && v <= b ? "text-green-400 font-bold" : "text-white"}>{fmtMs(v)}</span>
+    <span style={isBest(v, b) ? { color: BLUE, fontWeight: 800 } : undefined} className={isBest(v, b) ? "" : "text-white"}>
+      {fmtMs(v)}
+    </span>
   );
   const gapTxt = (r) =>
     !r.gap ? "–" : r.gap.laps ? `${r.gap.laps} tr` : fmtGapMs(r.gap.ms);
@@ -663,16 +668,16 @@ function LiveBlock({ info, live, num, now, showTable }) {
   const line = (r, me) => (
     <div
       key={r.num}
-      className={`${rowCls} px-1 py-0.5 ${me ? "bg-white/15 rounded font-black text-white" : "text-white/80"}`}
-      style={cols}
+      className={`${rowCls} px-1 py-0.5 ${me ? "rounded font-black" : "text-white/80"}`}
+      style={me ? { ...cols, color: GREEN, backgroundColor: "rgba(57,255,20,0.14)", boxShadow: `inset 0 0 0 1px ${GREEN}` } : cols}
     >
       <span>P{r.pos}</span>
       <span className="truncate font-sans">
         #{r.num} {r.team}
       </span>
-      <span>{fmtSec1(r.s1)}</span>
-      <span>{fmtSec1(r.s2)}</span>
-      <span>{fmtSec1(r.s3)}</span>
+      <span style={isBest(r.s1, r.s1b) ? { color: BLUE, fontWeight: 800 } : undefined}>{fmtSec1(r.s1)}</span>
+      <span style={isBest(r.s2, r.s2b) ? { color: BLUE, fontWeight: 800 } : undefined}>{fmtSec1(r.s2)}</span>
+      <span style={isBest(r.s3, r.s3b) ? { color: BLUE, fontWeight: 800 } : undefined}>{fmtSec1(r.s3)}</span>
       <span className="text-right">
         {me ? "" : (r.ahead ? "▲ " : "▼ ") + gapTxt(r)}
       </span>
@@ -701,20 +706,45 @@ function LiveBlock({ info, live, num, now, showTable }) {
           </span>
         )}
         <span>Dernier {fmtMs(live.last)}</span>
-        <span>Meilleur {fmtMs(live.best)}</span>
+        <span>
+          Meilleur <b style={{ color: BLUE }}>{fmtMs(live.best)}</b>
+        </span>
         {live.pits != null && <span>Arrêts {live.pits}</span>}
       </div>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
         <span>
-          S1 {sec(live.s1, live.s1b)} <span className="text-white/40">({fmtMs(live.s1b)})</span>
+          S1 {sec(live.s1, live.s1b)} <span style={{ color: BLUE }}>({fmtMs(live.s1b)})</span>
         </span>
         <span>
-          S2 {sec(live.s2, live.s2b)} <span className="text-white/40">({fmtMs(live.s2b)})</span>
+          S2 {sec(live.s2, live.s2b)} <span style={{ color: BLUE }}>({fmtMs(live.s2b)})</span>
         </span>
         <span>
-          S3 {sec(live.s3, live.s3b)} <span className="text-white/40">({fmtMs(live.s3b)})</span>
+          S3 {sec(live.s3, live.s3b)} <span style={{ color: BLUE }}>({fmtMs(live.s3b)})</span>
         </span>
       </div>
+      {driverBest && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 border-t border-white/10 pt-1">
+          <span className="text-white">Pilote {driverBest.name || "?"} :</span>
+          {driverBest.best && (driverBest.best.lap || driverBest.best.s1 || driverBest.best.s2 || driverBest.best.s3) ? (
+            <>
+              <span>
+                Meilleur tour <b style={{ color: BLUE }}>{fmtMs(driverBest.best.lap)}</b>
+              </span>
+              <span>
+                S1 <b style={{ color: BLUE }}>{fmtMs(driverBest.best.s1)}</b>
+              </span>
+              <span>
+                S2 <b style={{ color: BLUE }}>{fmtMs(driverBest.best.s2)}</b>
+              </span>
+              <span>
+                S3 <b style={{ color: BLUE }}>{fmtMs(driverBest.best.s3)}</b>
+              </span>
+            </>
+          ) : (
+            <span className="text-white/40">pas encore de temps enregistré</span>
+          )}
+        </div>
+      )}
       {nb && (
         <div className="flex flex-col gap-0.5 pt-1 border-t border-white/10">
           <div className={`${rowCls} px-1 text-white/40 uppercase text-[9px]`} style={cols}>
@@ -1183,7 +1213,8 @@ export default function PitBoard() {
     const feedAgeSec = Math.max(0, Math.round((liveRow.fetchedAt - liveRow.generatedAt) / 1000));
     return {
       cars: liveRow.cars,
-      relayAlive: relayAgeSec <= 25,
+      // lecture directe : une donnée toutes les 3 s ; mode page RIS : la page RIS rafraîchit à son rythme
+      relayAlive: relayAgeSec <= (settings.liveSource === "page" ? 120 : 25),
       relayAgeSec,
       feedFresh: feedAgeSec <= 90 && liveRow.status !== "FINISHED",
       feedAgeSec,
@@ -1193,7 +1224,7 @@ export default function PitBoard() {
       elapsedMs: liveRow.elapsedMs == null ? null : liveRow.elapsedMs,
       remainingMs: liveRow.remainingMs == null ? null : liveRow.remainingMs,
     };
-  }, [settings.liveEnabled, settings.liveUuid, liveRow, now]);
+  }, [settings.liveEnabled, settings.liveUuid, settings.liveSource, liveRow, now]);
 
   // données live d'une voiture (null si pas de flux, relais arrêté ou voiture absente du flux)
   function liveFor(car) {
@@ -3696,6 +3727,11 @@ export default function PitBoard() {
                               num={normalizeCarNumber(car.numero)}
                               now={now}
                               showTable={expanded || !!myCar}
+                              driverBest={
+                                ds && ds.curDriver
+                                  ? { name: driverName(ds.curDriver), best: ds.cfg.best[ds.curDriver.id] }
+                                  : null
+                              }
                             />
                           )}
 
@@ -3730,9 +3766,11 @@ export default function PitBoard() {
                                           </span>
                                         </span>
                                       </div>
-                                      {bst && (bst.lap || bst.s1 || bst.s2 || bst.s3) && (
-                                        <div className="font-mono text-[9px] text-white/50 pl-2">
-                                          Meilleur tour {fmtMs(bst.lap)} · S1 {fmtMs(bst.s1)} · S2 {fmtMs(bst.s2)} · S3 {fmtMs(bst.s3)}
+                                      {liveFor(car) && (
+                                        <div className="font-mono text-[9px] pl-2" style={{ color: "#4da3ff" }}>
+                                          {bst && (bst.lap || bst.s1 || bst.s2 || bst.s3)
+                                            ? `Meilleur tour ${fmtMs(bst.lap)} · S1 ${fmtMs(bst.s1)} · S2 ${fmtMs(bst.s2)} · S3 ${fmtMs(bst.s3)}`
+                                            : <span className="text-white/35">Meilleurs temps : pas encore enregistrés</span>}
                                         </div>
                                       )}
                                       </div>
