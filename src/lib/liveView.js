@@ -397,11 +397,11 @@ function nearestSame(pts, k, t, maxDiff) {
 }
 
 // dernier point de chronométrage franchi à la fois par nous (myPts, dernier index a) et par X : { ai, bi } ou null
-function lastCommonPoint(myPts, a, xPts, myLap) {
+function lastCommonPoint(myPts, a, xPts, myLap, allowBad = false) {
   for (let j = 0; j < 3 && a - j >= 0; j++) {
     const q = myPts[a - j];
     const xi = nearestSame(xPts, q.k, q.t, 0.45 * myLap);
-    if (xi >= 0 && !q.bad && !xPts[xi].bad) return { ai: a - j, bi: xi };
+    if (xi >= 0 && (allowBad || (!q.bad && !xPts[xi].bad))) return { ai: a - j, bi: xi };
   }
   return null;
 }
@@ -441,9 +441,10 @@ export function aroundOnTrack(cars, myNum, nowMs, store = paceStore, hist = lapS
     if (!xSec) continue;
     const xPts = pointTimeline(num, c, nowMs, xSec, hist);
     const b = xPts.length - 1;
-    if (b < 0 || xPts[b].bad) continue;
-    if (nowMs - xPts[b].t > 1.5 * (xSec[0] + xSec[1] + xSec[2]) || isOverdue(xPts[b], xSec, nowMs)) continue;
-    const cp = lastCommonPoint(myPts, a, xPts, myLap);
+    if (b < 0) continue;
+    // tableau d'affichage : l'écart déjà mesuré reste exact même si la voiture est en retard (drapeau jaune, neutralisation) ; on n'écarte que les voitures sans nouvelles depuis 4 tours
+    if (nowMs - xPts[b].t > 4 * (xSec[0] + xSec[1] + xSec[2])) continue;
+    const cp = lastCommonPoint(myPts, a, xPts, myLap, true); // l'écart mesuré entre deux heures de passage reste exact même sur un tour de stand
     if (!cp) continue;
     const g0 = xPts[cp.bi].t - myPts[cp.ai].t;
     if (g0 === 0) continue;
@@ -459,6 +460,7 @@ export function aroundOnTrack(cars, myNum, nowMs, store = paceStore, hist = lapS
   }
   const ahead = rows.filter((r) => r.gapMs < 0).sort((x, y) => Math.abs(x.gapMs) - Math.abs(y.gapMs)).slice(0, nAhead).reverse();
   const behind = rows.filter((r) => r.gapMs > 0).sort((x, y) => x.gapMs - y.gapMs).slice(0, nBehind);
+  if (!ahead.length && !behind.length) return null; // rien de mesurable (voiture à l'arrêt, flux interrompu) : l'écran garde le dernier tableau valide
   return { ahead, behind, me: cls[myNum] || null, ref: { point: ["S1", "S2", "Ligne"][myPts[a].k], at: myPts[a].t } };
 }
 

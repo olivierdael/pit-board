@@ -898,7 +898,7 @@ function AroundTable({ data, prio, myPos, now, stale, nA, nB, setNA, setNB }) {
       )}
       {stale > 0 && (
         <div className="rounded bg-orange-500/20 border border-orange-400/60 px-2 py-1 mb-1 text-orange-200 font-sans text-xs">
-          ⚠ Données figées depuis {stale} s (notre voiture est aux stands ou le flux est interrompu) : le tableau reprend dès le prochain point.
+          ⚠ Données figées depuis {stale} s (notre voiture est aux stands ou à l'arrêt, ou le flux est interrompu) : le tableau reprend dès le prochain point.
         </div>
       )}
       <div className="flex flex-wrap items-center gap-3 px-2 pb-1 text-white font-sans text-xs">
