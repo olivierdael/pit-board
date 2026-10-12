@@ -22,7 +22,7 @@ import {
   observeLap,
   mergeBest,
 } from "./lib/drivers";
-import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages } from "./lib/liveView";
+import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, classDuels } from "./lib/liveView";
 import {
   Flag,
   Plus,
@@ -290,74 +290,54 @@ function playBeep(ref) {
   } catch (e) {}
 }
 
-// annonce vocale électronique, voix masculine à accent belge si disponible, précédée d'un bip
-function speakAnnouncement(audioRef, numero, seconds, isReminder) {
+// squelette commun des annonces vocales : carillon, puis (après 400 ms) voix choisie et lecture
+// build() -> utterance ; pick(utter, voices) choisit la voix / la langue
+function speakJob(chime, build, pick) {
   if (typeof window === "undefined" || !window.speechSynthesis) return;
   queueSpeechJob(
     () =>
       new Promise((resolve) => {
         try {
-          playBeep(audioRef);
-
-          const delay = describeDelay(seconds);
-          const prefix = isReminder ? "Rappel." : "Attention.";
-          const text = `${prefix} La voiture numéro ${numero} va rentrer au stand ${delay}.`;
-          const utter = new SpeechSynthesisUtterance(text);
-          utter.rate = 0.92;
-          utter.pitch = 0.45; // voix grave, masculine et synthétique
+          chime();
+          const utter = build();
           utter.volume = 1;
-
-          const applyVoiceAndSpeak = () => {
-            const voices = window.speechSynthesis.getVoices();
-            const voice = pickMaleVoice(voices);
-            if (voice) utter.voice = voice;
-            // utilise l'accent belge si une voix fr-BE existe, sinon repli sur le français standard
-            utter.lang = hasBelgianVoice(voices) ? "fr-BE" : "fr-FR";
+          const go = () => {
+            pick(utter, window.speechSynthesis.getVoices());
             speakWithSafety(utter, resolve);
           };
-
-          // laisse le carillon se terminer avant de parler
-          setTimeout(() => waitForVoicesThenRun(applyVoiceAndSpeak), 400);
+          setTimeout(() => waitForVoicesThenRun(go), 400);
         } catch (e) {
           resolve();
         }
       })
   );
 }
+// voix grave "annonce de gare" (accent belge si une voix fr-BE existe)
+function pickStationVoice(utter, voices) {
+  const voice = pickMaleVoice(voices);
+  if (voice) utter.voice = voice;
+  utter.lang = hasBelgianVoice(voices) ? "fr-BE" : "fr-FR";
+}
+function stationUtter(text) {
+  const u = new SpeechSynthesisUtterance(text);
+  u.rate = 0.92;
+  u.pitch = 0.45; // voix grave, masculine et synthétique
+  return u;
+}
+
+// annonce vocale électronique, voix masculine à accent belge si disponible, précédée d'un bip
+function speakAnnouncement(audioRef, numero, seconds, isReminder) {
+  const prefix = isReminder ? "Rappel." : "Attention.";
+  const text = `${prefix} La voiture numéro ${numero} va rentrer au stand ${describeDelay(seconds)}.`;
+  speakJob(() => playBeep(audioRef), () => stationUtter(text), pickStationVoice);
+}
 
 // annonce vocale (voix homme) quand un manager clique sur un onglet de point de piste ("Entrée", "Source", "Kemmel", etc.)
 function speakTrackPoint(audioRef, numero, pointName, sec) {
-  if (typeof window === "undefined" || !window.speechSynthesis) return;
-  queueSpeechJob(
-    () =>
-      new Promise((resolve) => {
-        try {
-          playBeep(audioRef);
-
-          const timePart =
-            typeof sec === "number" && sec > 0
-              ? ` Le temps estimé avant l'entrée au stand est de ${describeDuration(sec)}.`
-              : "";
-          const text = `Attention. La voiture numéro ${numero} est à ${pointName}.${timePart}`;
-          const utter = new SpeechSynthesisUtterance(text);
-          utter.rate = 0.92;
-          utter.pitch = 0.45; // voix grave, masculine et synthétique
-          utter.volume = 1;
-
-          const applyVoiceAndSpeak = () => {
-            const voices = window.speechSynthesis.getVoices();
-            const voice = pickMaleVoice(voices);
-            if (voice) utter.voice = voice;
-            utter.lang = hasBelgianVoice(voices) ? "fr-BE" : "fr-FR";
-            speakWithSafety(utter, resolve);
-          };
-
-          setTimeout(() => waitForVoicesThenRun(applyVoiceAndSpeak), 400);
-        } catch (e) {
-          resolve();
-        }
-      })
-  );
+  const timePart =
+    typeof sec === "number" && sec > 0 ? ` Le temps estimé avant l'entrée au stand est de ${describeDuration(sec)}.` : "";
+  const text = `Attention. La voiture numéro ${numero} est à ${pointName}.${timePart}`;
+  speakJob(() => playBeep(audioRef), () => stationUtter(text), pickStationVoice);
 }
 
 // ne retombe JAMAIS sur une voix d'une autre langue : mieux vaut laisser le navigateur
@@ -431,69 +411,42 @@ function playAlertSiren(ref) {
 
 // alerte "full course yellow" : sirène puis annonce vocale rapide et agressive
 function speakYellowAlert(audioRef, text) {
-  if (typeof window === "undefined" || !window.speechSynthesis) return;
-  queueSpeechJob(
-    () =>
-      new Promise((resolve) => {
-        try {
-          playAlertSiren(audioRef);
-
-          const utter = new SpeechSynthesisUtterance(text);
-          utter.rate = 1.0; // débit normal, posé, pas précipité
-          utter.pitch = 0.95; // voix d'homme naturelle, quasi neutre, très intelligible
-          utter.volume = 1;
-
-          const applyVoiceAndSpeak = () => {
-            const voices = window.speechSynthesis.getVoices();
-            const voice = pickVoiceForLangStrict(voices, "en", false);
-            // n'assigne une voix que si elle est vraiment anglaise ; sinon on laisse le
-            // navigateur choisir via utter.lang plutôt que de forcer une voix française
-            // qui prononcerait mal le texte anglais
-            if (voice) utter.voice = voice;
-            utter.lang = "en-US";
-            speakWithSafety(utter, resolve);
-          };
-
-          setTimeout(() => waitForVoicesThenRun(applyVoiceAndSpeak), 400);
-        } catch (e) {
-          resolve();
-        }
-      })
+  speakJob(
+    () => playAlertSiren(audioRef),
+    () => {
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = 1.0; // débit normal, posé
+      u.pitch = 0.95;
+      return u;
+    },
+    (utter, voices) => {
+      // n'assigne une voix que si elle est vraiment anglaise (sinon le navigateur choisit via utter.lang)
+      const voice = pickVoiceForLangStrict(voices, "en", false);
+      if (voice) utter.voice = voice;
+      utter.lang = "en-US";
+    }
   );
 }
 
 // lecture d'un message d'équipe : bip de début puis voix agréable et naturelle
 function speakMessage(audioRef, numero, managerName, text) {
-  if (typeof window === "undefined" || !window.speechSynthesis) return;
-  queueSpeechJob(
-    () =>
-      new Promise((resolve) => {
-        try {
-          playBeep(audioRef);
-
-          const who = managerName ? `de ${managerName}, ` : "";
-          const spoken = `Message ${who}pour la voiture numéro ${numero}. ${text}`;
-          const utter = new SpeechSynthesisUtterance(spoken);
-          utter.rate = 1.0;
-          utter.pitch = 1.05; // ton naturel et chaleureux, pas de voix électronique
-          utter.volume = 1;
-          utter.lang = "fr-FR";
-
-          const applyVoiceAndSpeak = () => {
-            const voices = window.speechSynthesis.getVoices();
-            const frVoices = voices.filter((v) => v.lang && v.lang.toLowerCase().startsWith("fr"));
-            if (frVoices.length > 0) {
-              utter.voice = frVoices[0];
-              utter.lang = frVoices[0].lang;
-            }
-            speakWithSafety(utter, resolve);
-          };
-
-          setTimeout(() => waitForVoicesThenRun(applyVoiceAndSpeak), 400);
-        } catch (e) {
-          resolve();
-        }
-      })
+  const who = managerName ? `de ${managerName}, ` : "";
+  speakJob(
+    () => playBeep(audioRef),
+    () => {
+      const u = new SpeechSynthesisUtterance(`Message ${who}pour la voiture numéro ${numero}. ${text}`);
+      u.rate = 1.0;
+      u.pitch = 1.05; // ton naturel et chaleureux
+      u.lang = "fr-FR";
+      return u;
+    },
+    (utter, voices) => {
+      const fr = voices.filter((v) => v.lang && v.lang.toLowerCase().startsWith("fr"));
+      if (fr.length > 0) {
+        utter.voice = fr[0];
+        utter.lang = fr[0].lang;
+      }
+    }
   );
 }
 
@@ -672,6 +625,66 @@ function CarVideo({ url, always }) {
   );
 }
 
+// Fenêtre (team manager) : la fenêtre s'ouvre en grand par-dessus l'écran ; pour les autres rôles le panneau reste affiché en place.
+function PanelHost({ modal, open, onClose, title, children }) {
+  if (!modal) return children;
+  if (!open) return null;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/75 p-3 sm:p-6"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="w-full max-w-4xl my-auto rounded-xl bg-neutral-900 border border-white/25 shadow-2xl">
+        <div className="flex items-center justify-between px-4 py-2 border-b border-white/10">
+          <div className="text-white font-black uppercase tracking-wide text-sm">{title}</div>
+          <button onClick={onClose} className="text-white/70 hover:text-white" title="Fermer">
+            <X size={20} />
+          </button>
+        </div>
+        <div className="p-3 [&>div]:mb-0">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+// temps de roulage et meilleurs temps de tous les pilotes d'une voiture (menu déroulant côté team manager)
+function DriversTimes({ ds, hasLive }) {
+  return (
+    <div className="text-[10px] text-white/70 flex flex-col gap-1">
+      {ds.cfg.list.map((p) => {
+        const t = ds.totals[p.id];
+        const isCur = ds.curDriver && ds.curDriver.id === p.id;
+        const bst = ds.cfg.best[p.id];
+        return (
+          <div key={p.id} className="flex flex-col">
+            <div className={`flex items-center justify-between gap-2 font-mono ${isCur ? "text-white font-bold" : ""} ${p.absent ? "opacity-50" : ""}`}>
+              <span className="truncate font-sans">
+                {driverName(p) || "Pilote sans nom"}
+                {p.absent ? " (indisp.)" : ""}
+              </span>
+              <span className="whitespace-nowrap">
+                {fmtTimeHMS(t.total)}{" "}
+                <span className="text-white/50">
+                  🟢{fmtTimeHMS(t.vert)} 🟡{fmtTimeHMS(t.jaune)} · {t.relays} rel. · {t.laps} tr
+                </span>
+              </span>
+            </div>
+            {hasLive && (
+              <div className="font-mono text-[9px] pl-2" style={{ color: "#4da3ff" }}>
+                {bst && (bst.lap || bst.s1 || bst.s2 || bst.s3)
+                  ? `Meilleur tour ${fmtMs(bst.lap)} · S1 ${fmtMs(bst.s1)} · S2 ${fmtMs(bst.s2)} · S3 ${fmtMs(bst.s3)}`
+                  : <span className="text-white/35">Meilleurs temps : pas encore enregistrés</span>}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function DraftInput({ value, onCommit, placeholder, className, disabled }) {
   const [draft, setDraft] = useState(value || "");
   const focusedRef = useRef(false);
@@ -700,10 +713,98 @@ function DraftInput({ value, onCommit, placeholder, className, disabled }) {
 
 // bloc "live" d'une tuile : temps de course, tour, intermédiaires, puis (si showTable) le classement
 // avec les 3 voitures devant et les 3 derrière, leurs intermédiaires et leur écart avec nous
-function LiveBlock({ info, live, num, now, showTable, driverBest }) {
+function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", big = false }) {
+  const [openZ, setOpenZ] = useState({}); // menus déroulants des alertes (devant / derrière / piste)
   if (!live) return null;
   const clock = clockNow(info, now);
-  const nb = showTable ? neighborsOf(info.cars, num, 3) : null;
+  const nb = showTable && part !== "main" && part !== "alerts" ? neighborsOf(info.cars, num, 3) : null;
+  // estimation des dépassements : voisins calculés même si le tableau est replié
+  updatePace(info.cars);
+  const remMs = clock && clock.remainingSec != null ? clock.remainingSec * 1000 : null;
+  // priorité : toutes les voitures proches SUR LA PISTE (heures de passage du flux) ; repli : voisins du classement
+  const duel = duelEstimatesTrack(info.cars, num, remMs) || duelEstimates(nb || neighborsOf(info.cars, num, 3), remMs);
+  const prio = duel && duel.onTrack ? prioritizedDuels(duel, now) : [];
+  const zones = classDuels(neighborsOf(info.cars, num, 3), remMs, now);
+  // couleurs d'une alerte : rouge/orange = elle va nous dépasser ; jaune = nous allons la dépasser
+  const alertStyle = (threat, level, remainingMs) => {
+    const hot = level === "high" || remainingMs <= 120000;
+    if (threat)
+      return { hot, bg: hot ? "#ff1f1f" : level === "mid" ? "#ff8a00" : "rgba(255,138,0,0.18)", fg: hot ? "#fff" : level === "mid" ? "#000" : "#ffb347" };
+    return { hot, bg: hot || level === "mid" ? "#ffe600" : "rgba(255,230,0,0.15)", fg: hot || level === "mid" ? "#000" : "#ffe600" };
+  };
+  const K = big ? 1.3 : 1; // agrandissement des alertes quand il y a de la place
+  const fs = (n) => Math.round(n * K);
+  const lapsTxt = (l) => (l < 10 ? l.toFixed(1) : String(Math.round(l)));
+  const cd = (ms, size) => (
+    <span className="font-mono tabular-nums font-black" style={{ fontSize: size }}>
+      {ms <= 1000 ? "MAINTENANT" : fmtCountdown(ms)}
+    </span>
+  );
+  const zoneRow = (z) => {
+    const closing = z.kind === "closing";
+    const ahead = z.dir === "ahead";
+    const st = closing ? alertStyle(!ahead, z.level, z.remainingMs) : { hot: false, bg: "rgba(255,255,255,0.06)", fg: "rgba(255,255,255,0.75)" };
+    let detail;
+    if (z.kind === "lapped") detail = `à ${z.gapLaps} tour${z.gapLaps > 1 ? "s" : ""} : pas d'estimation`;
+    else if (z.kind === "unknown") detail = "pas assez de données";
+    else if (z.kind === "away")
+      detail = `${fmtGapMs(z.gapMs)} · ${ahead ? "s'éloigne" : "on s'éloigne"} (${(Math.abs(z.diffMs) / 1000).toFixed(1)} s/tour)${z.farOff ? " · trop lointain" : ""}`;
+    else detail = `${fmtGapMs(z.gapMs)} · ${ahead ? "+" : "gagne "}${(z.diffMs / 1000).toFixed(1)} s/tour · ~${lapsTxt(z.laps)} tr`;
+    return (
+      <div
+        key={z.dir + z.num}
+        className={`font-sans leading-tight rounded px-2 py-1 flex items-center justify-between gap-2 ${closing ? "font-black" : "font-semibold"}`}
+        style={{ backgroundColor: st.bg, color: st.fg, fontSize: fs(11) }}
+      >
+        <span>
+          {closing ? (ahead ? (st.hot ? "⚠ À DÉPASSER : " : "↗ À dépasser : ") : st.hot ? "⚠ VA NOUS DÉPASSER : " : "↘ Va nous dépasser : ") : ""}P{z.pos} #{z.num} {z.team}
+          <span className="block font-bold" style={{ fontSize: fs(10) }}>{detail}</span>
+        </span>
+        {closing && cd(z.remainingMs, 16)}
+      </div>
+    );
+  };
+  const trackRow = (d) => {
+    const threat = d.dir === "threat";
+    const st = alertStyle(threat, d.level, d.remainingMs);
+    return (
+      <div
+        key={d.dir + d.num}
+        className="font-sans font-black leading-tight rounded px-2 py-1 flex items-center justify-between gap-2"
+        style={{ backgroundColor: st.bg, color: st.fg, fontSize: fs(11) }}
+      >
+        <span>
+          {threat ? (st.hot ? "⚠ ON VA NOUS DÉPASSER : " : "↘ Va nous dépasser : ") : st.hot ? "⚠ À DÉPASSER : " : "↗ À dépasser : "}
+          {d.pos ? `P${d.pos} ` : ""}#{d.num} {d.team}
+          <span className="block font-bold" style={{ fontSize: fs(10) }}>
+            sur la piste {fmtGapMs(d.gapMs)} · {threat ? "gagne " : "+"}
+            {(d.closingMs / 1000).toFixed(1)} s/tour · ~{lapsTxt(d.laps)} tr
+          </span>
+        </span>
+        {cd(d.remainingMs, fs(16))}
+      </div>
+    );
+  };
+  // groupes d'alertes (menus déroulants) ; "soonest" = alerte la plus proche du groupe
+  const groups = [
+    {
+      key: "ahead",
+      title: "Devant nous au général",
+      rows: zones ? zones.ahead : [],
+      closing: zones ? zones.ahead.filter((z) => z.kind === "closing") : [],
+      render: zoneRow,
+      threat: false,
+    },
+    {
+      key: "behind",
+      title: "Derrière nous au général",
+      rows: zones ? zones.behind : [],
+      closing: zones ? zones.behind.filter((z) => z.kind === "closing") : [],
+      render: zoneRow,
+      threat: true,
+    },
+    { key: "track", title: "Trafic sur la piste", rows: prio, closing: prio, render: trackRow, threat: null },
+  ].filter((g) => g.rows.length > 0);
   const BLUE = "#4da3ff"; // meilleurs temps et intermédiaires
   const GREEN = "#39ff14"; // notre voiture
   const isBest = (v, b) => v != null && b != null && v <= b;
@@ -715,7 +816,7 @@ function LiveBlock({ info, live, num, now, showTable, driverBest }) {
   const gapTxt = (r) =>
     !r.gap ? "–" : r.gap.laps ? `${r.gap.laps} tr` : fmtGapMs(r.gap.ms);
   const rowCls = "grid items-center gap-x-1.5 font-mono text-[10px]";
-  const cols = { gridTemplateColumns: "2.2rem 1fr 2.6rem 2.6rem 2.6rem 3.4rem" };
+  const cols = { gridTemplateColumns: "2.2rem 1fr 4rem 2.6rem 2.6rem 2.6rem 3.4rem" };
   const line = (r, me) => (
     <div
       key={r.num}
@@ -726,6 +827,7 @@ function LiveBlock({ info, live, num, now, showTable, driverBest }) {
       <span className="truncate font-sans">
         #{r.num} {r.team}
       </span>
+      <span style={isBest(r.last, r.best) ? { color: BLUE, fontWeight: 800 } : undefined}>{fmtMs(r.last)}</span>
       <span style={isBest(r.s1, r.s1b) ? { color: BLUE, fontWeight: 800 } : undefined}>{fmtSec1(r.s1)}</span>
       <span style={isBest(r.s2, r.s2b) ? { color: BLUE, fontWeight: 800 } : undefined}>{fmtSec1(r.s2)}</span>
       <span style={isBest(r.s3, r.s3b) ? { color: BLUE, fontWeight: 800 } : undefined}>{fmtSec1(r.s3)}</span>
@@ -734,8 +836,33 @@ function LiveBlock({ info, live, num, now, showTable, driverBest }) {
       </span>
     </div>
   );
+  const tableEl = nb ? (
+        <div className="flex flex-col gap-0.5 pt-1 border-t border-white/10">
+          <div className={`${rowCls} px-1 text-white/40 uppercase text-[9px]`} style={cols}>
+            <span>Pos</span>
+            <span>Voiture</span>
+            <span>Tour</span>
+            <span>S1</span>
+            <span>S2</span>
+            <span>S3</span>
+            <span className="text-right">Écart</span>
+          </div>
+          {nb.above.map((r) => line(r, false))}
+          {line({ ...nb.me, num, ahead: false }, true)}
+          {nb.below.map((r) => line(r, false))}
+        </div>
+  ) : null;
+  if (part === "table")
+    return nb ? (
+      <div className="rounded bg-black/40 px-2 py-1.5 flex flex-col gap-1 text-[10px] font-mono text-white/80">
+        <div className="text-[10px] font-black uppercase tracking-wide text-white/60 font-sans">Classement autour de nous</div>
+        {tableEl}
+      </div>
+    ) : null;
   return (
     <div className="rounded bg-black/40 px-2 py-1.5 flex flex-col gap-1 text-[10px] font-mono text-white/80">
+      {part !== "alerts" && (
+        <>
       {clock && (
         <div className="flex items-center justify-between gap-2">
           <span>
@@ -796,21 +923,99 @@ function LiveBlock({ info, live, num, now, showTable, driverBest }) {
           )}
         </div>
       )}
-      {nb && (
-        <div className="flex flex-col gap-0.5 pt-1 border-t border-white/10">
-          <div className={`${rowCls} px-1 text-white/40 uppercase text-[9px]`} style={cols}>
-            <span>Pos</span>
-            <span>Voiture</span>
-            <span>S1</span>
-            <span>S2</span>
-            <span>S3</span>
-            <span className="text-right">Écart</span>
-          </div>
-          {nb.above.map((r) => line(r, false))}
-          {line({ ...nb.me, num, ahead: false }, true)}
-          {nb.below.map((r) => line(r, false))}
+        </>
+      )}
+      {part !== "table" && part !== "stats" && (
+        <div className="flex flex-col gap-2 pt-1 border-t border-white/10">
+          {(() => {
+            // un rectangle par famille d'estimations : piste (bleu) puis classement général (violet)
+            const boxes = [
+              { key: "track", title: "🏁 Trafic sur la piste", sub: "voitures proches de nous sur le circuit, tous rangs", color: "#38bdf8", bg: "rgba(14,165,233,0.12)", keys: ["track"] },
+              { key: "gen", title: "🏆 Dépassements au classement général", sub: "les 3 devant et les 3 derrière nous", color: "#c084fc", bg: "rgba(168,85,247,0.14)", keys: ["ahead", "behind"] },
+            ];
+            return boxes.map((box) => {
+              const gs = groups.filter((g) => box.keys.includes(g.key));
+              const urg = gs
+                .flatMap((g) =>
+                  g.closing.map((r) => ({
+                    r,
+                    threat: g.key === "track" ? r.dir === "threat" : g.threat,
+                    where: g.key === "track" ? "piste" : g.key === "ahead" ? "devant" : "derrière",
+                  }))
+                )
+                .sort((a, b) => a.r.remainingMs - b.r.remainingMs)[0];
+              return (
+                <div key={box.key} className="rounded-lg p-1.5 flex flex-col gap-1" style={{ backgroundColor: box.bg, border: `2px solid ${box.color}` }}>
+                  <div className="flex flex-col font-sans leading-tight">
+                    <span className="font-black uppercase tracking-wide" style={{ color: box.color, fontSize: fs(12) }}>{box.title}</span>
+                    <span className="text-white/50" style={{ fontSize: fs(10) }}>{box.sub}</span>
+                  </div>
+                  {urg ? (
+                    (() => {
+                      const st = alertStyle(urg.threat, urg.r.level, urg.r.remainingMs);
+                      return (
+                        <div
+                          className="font-sans font-black leading-tight rounded px-2 py-1.5 flex items-center justify-between gap-2"
+                          style={{ backgroundColor: st.bg, color: st.fg, fontSize: fs(14) }}
+                        >
+                          <span>
+                            {urg.threat ? (st.hot ? "⚠ ON VA NOUS DÉPASSER" : "↘ Va nous dépasser") : st.hot ? "⚠ NOUS DÉPASSONS" : "↗ Nous allons dépasser"}
+                            <span className="block font-bold" style={{ fontSize: fs(11) }}>
+                              {urg.r.pos ? `P${urg.r.pos} ` : ""}#{urg.r.num} {urg.r.team} · {urg.where}
+                            </span>
+                          </span>
+                          {cd(urg.r.remainingMs, fs(30))}
+                        </div>
+                      );
+                    })()
+                  ) : (
+                    <div className="rounded px-2 py-1 bg-white/5 text-white/60 font-sans font-semibold" style={{ fontSize: fs(11) }}>
+                      Aucun dépassement prévu pour le moment
+                    </div>
+                  )}
+                  {gs.map((g) => {
+                    const open = !!openZ[g.key];
+                    const soon = [...g.closing].sort((a, b) => a.remainingMs - b.remainingMs)[0];
+                    const cst = soon ? alertStyle(g.key === "track" ? soon.dir === "threat" : g.threat, soon.level, soon.remainingMs) : null;
+                    return (
+                      <div key={g.key} className="flex flex-col gap-1">
+                        <button
+                          type="button"
+                          onClick={() => setOpenZ((o) => ({ ...o, [g.key]: !o[g.key] }))}
+                          className="flex items-center justify-between gap-2 rounded bg-black/30 hover:bg-black/45 px-2 py-1 text-left"
+                        >
+                          <span className="font-black uppercase tracking-wide text-white/80" style={{ fontSize: fs(10) }}>
+                            {open ? "▾" : "▸"} {g.title} ({g.rows.length})
+                          </span>
+                          {soon ? (
+                            <span className="rounded px-1.5 py-0.5 flex items-center gap-1.5" style={{ backgroundColor: cst.bg, color: cst.fg, fontSize: fs(10) }}>
+                              <b className="font-sans">#{soon.num}</b>
+                              {cd(soon.remainingMs, fs(12))}
+                            </span>
+                          ) : (
+                            <span className="text-white/40" style={{ fontSize: fs(10) }}>rien à signaler</span>
+                          )}
+                        </button>
+                        {open && (
+                          <div className="flex flex-col gap-1">
+                            {g.rows.slice(0, 6).map(g.render)}
+                            {g.rows.length > 6 && (
+                              <div className="text-white/50 font-sans" style={{ fontSize: fs(10) }}>
+                                + {g.rows.length - 6} autres voitures plus lointaines
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            });
+          })()}
         </div>
       )}
+      {nb && part === "all" && tableEl}
     </div>
   );
 }
@@ -1114,6 +1319,15 @@ export default function PitBoard() {
   const [cars, setCars] = useState(emptyCars());
   const [showSetup, setShowSetup] = useState(false);
   const [showMessageForm, setShowMessageForm] = useState(true);
+  const [modal, setModal] = useState(null); // team manager : "announce" | "message" | "tech"
+  const [driversOpen, setDriversOpen] = useState(false); // menu déroulant "autres pilotes"
+  const [techAck, setTechAck] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("pitboard_techack") || "{}") || {};
+    } catch (e) {
+      return {};
+    }
+  }); // { [carId]: id de la dernière fiche technique envoyée }
   const [calls, setCalls] = useState([]);
   const [messages, setMessages] = useState([]);
   const [flagHistory, setFlagHistory] = useState([{ flag: "vert", ts: Date.now() }]);
@@ -1178,7 +1392,6 @@ export default function PitBoard() {
   const [exportCsvText, setExportCsvText] = useState(null); // null = modale fermée
   const [exportCopyStatus, setExportCopyStatus] = useState("");
   const audioCtxRef = useRef(null);
-  const knownCallIdsRef = useRef(null); // null = pas encore initialisé (1er chargement)
   const justAddedLocallyRef = useRef(new Set());
   const justAddedMessageLocallyRef = useRef(new Set());
   const [soundOn, setSoundOn] = useState(true);
@@ -1191,7 +1404,6 @@ export default function PitBoard() {
   const messagesRef = useRef([]);
   const carsRef = useRef([]);
   const settingsRef = useRef(settings);
-  const knownMessageIdsRef = useRef(null);
   const lastKnownFlagRef = useRef(null);
   const flagTsRef = useRef(0);
   useEffect(() => {
@@ -1252,6 +1464,7 @@ export default function PitBoard() {
     if (myCar) {
       setFCar(String(myCar.id));
       setMCar(String(myCar.id));
+      setTechCarId(String(myCar.id));
     }
   }, [myCar && myCar.id]);
 
@@ -2570,6 +2783,19 @@ export default function PitBoard() {
     setTimeout(() => justAddedMessageLocallyRef.current.delete(newMsg.id), 4000);
     setMText("");
     setMCar(myCarIdRef.current != null ? String(myCarIdRef.current) : "");
+    if (myCarIdRef.current != null) setModal(null); // team manager : la fenêtre se ferme après l'envoi
+  }
+
+  // fiche technique envoyée : plus de clignotement, la fenêtre se ferme
+  function ackTech(carId, recordId) {
+    setTechAck((prev) => {
+      const next = { ...prev, [carId]: recordId };
+      try {
+        localStorage.setItem("pitboard_techack", JSON.stringify(next));
+      } catch (e) {}
+      return next;
+    });
+    setModal(null);
   }
 
   function removeMessage(id) {
@@ -2814,6 +3040,7 @@ export default function PitBoard() {
     setFSec("");
     setFFuel("");
     setFTasks("");
+    if (myCarIdRef.current != null) setModal(null); // team manager : la fenêtre se ferme après l'annonce
   }
 
   function removeCall(id) {
@@ -2969,6 +3196,7 @@ export default function PitBoard() {
       }}
     >
       <div className="max-w-7xl mx-auto px-3 py-4 pb-20">
+        <style>{"@keyframes pbblink{0%,100%{background:#ff1f1f;color:#fff}50%{background:#ffe600;color:#000}}"}</style>
         {/* EN-TÊTE + HORLOGE + DÉCOMPTE + BOUTONS (une seule ligne) */}
         <div className="flex items-center justify-between gap-3 flex-wrap mb-4 bg-black/20 rounded-lg px-3 py-2">
           <div className="flex items-center gap-2">
@@ -2977,7 +3205,7 @@ export default function PitBoard() {
             </div>
             <div>
               <h1 className="text-black text-lg tracking-wide font-black leading-none whitespace-nowrap">
-                TABLEAU DES ARRÊTS
+                Gestion Team manager by JFP racing
               </h1>
               <p className="text-black/60 text-[10px] tracking-widest uppercase font-semibold whitespace-nowrap">
                 Gestion des arrêts au stand
@@ -3690,9 +3918,10 @@ export default function PitBoard() {
         )}
 
         {/* DIRECTION DE COURSE (RC) : grand, en rouge */}
-        {rcMessages.length > 0 && (
+        {/* team manager : les messages visant sa voiture sont déjà dans la tuile, on ne garde ici que les messages généraux (sans numéro) */}
+        {(myCar ? rcMessages.filter((m) => m.nums.length === 0) : rcMessages).length > 0 && (
           <div className="mb-3 flex flex-col gap-2">
-            {rcMessages.map((m) => (
+            {(myCar ? rcMessages.filter((m) => m.nums.length === 0) : rcMessages).map((m) => (
               <div
                 key={m.key}
                 className="rounded-xl px-4 py-3 flex items-start gap-3 shadow-lg animate-pulse"
@@ -3741,6 +3970,97 @@ export default function PitBoard() {
                     const overMax = d && d.phase === "instand" && d.pitElapsed >= AUTO_REMOVE_AFTER_PIT_SEC - 30;
                     const nearEnd = d && d.phase === "countdown" && d.remaining <= 30 && d.remaining > 0;
                     const ringColor = overMax ? "#ff3b3b" : nearEnd ? "#ffd400" : "rgba(0,0,0,0.35)";
+                    const callControls = call ? (
+                                <>
+                                  {d.phase === "countdown" ? (
+                                    <>
+                                      <div className="flex gap-1.5 flex-wrap">
+                                        <button
+                                          onClick={() => {
+                                            if (!canEdit) return;
+                                            forceArrival(call.id);
+                                            if (soundOnRef.current) {
+                                              speakTrackPoint(audioCtxRef, call.numero, "Entrée");
+                                            }
+                                          }}
+                                          disabled={!canEdit}
+                                          className="flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed"
+                                          style={{ backgroundColor: car.couleur1, color: "#111" }}
+                                        >
+                                          <PlayCircle size={13} /> Entrée
+                                        </button>
+                                      </div>
+                                      <div className="flex gap-1 flex-wrap">
+                                        {TRACK_POINTS.map((p) => (
+                                          <button
+                                            key={p.name}
+                                            onClick={() => {
+                                              adjustCallTime(call.id, p.sec);
+                                              if (soundOnRef.current) {
+                                                speakTrackPoint(audioCtxRef, call.numero, p.name, p.sec);
+                                              }
+                                            }}
+                                            title={`Ajuster à ${fmtTime(p.sec)}`}
+                                            className="px-2 py-0.5 rounded-full text-[10px] font-semibold text-white/80 bg-white/5 border border-white/15 hover:bg-white/15 hover:text-white transition-colors"
+                                          >
+                                            {p.name} <span className="text-white/45">{fmtTime(p.sec)}</span>
+                                          </button>
+                                        ))}
+                                      </div>
+                                    </>
+                                  ) : confirmExitId === call.id ? (
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-white text-xs font-bold">Confirmer ?</span>
+                                      <button
+                                        onClick={() => {
+                                          removeCall(call.id);
+                                          setConfirmExitId(null);
+                                        }}
+                                        className="flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold text-white bg-red-600 hover:bg-red-500 transition-colors"
+                                      >
+                                        <CheckCircle2 size={13} /> Oui, elle sort
+                                      </button>
+                                      <button
+                                        onClick={() => setConfirmExitId(null)}
+                                        className="flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold text-white/80 bg-white/5 border border-white/15 hover:bg-white/15 hover:text-white transition-colors"
+                                      >
+                                        Annuler
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <button
+                                      onClick={() => canEdit && setConfirmExitId(call.id)}
+                                      disabled={!canEdit}
+                                      className="self-start flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold text-white/85 bg-white/5 border border-white/15 hover:bg-white/15 hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                    >
+                                      <CheckCircle2 size={13} /> Voiture quitte les stands
+                                    </button>
+                                  )}
+                                  {call.tasks && call.tasks.length > 0 && (
+                                    <div className="flex flex-wrap gap-1">
+                                      {call.tasks.slice(0, 6).map((t, i) => (
+                                        <span
+                                          key={i}
+                                          className="text-[11px] font-semibold text-white bg-white/10 rounded-full px-2 py-0.5"
+                                        >
+                                          {t}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  )}
+                                  <button
+                                    onClick={() => removeCall(call.id)}
+                                    className="self-start flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold text-white/50 hover:text-white"
+                                  >
+                                    <X size={11} /> Annuler l'annonce
+                                  </button>
+                                </>
+                    ) : null;
+                    const recsT = techChecks[car.id] || [];
+                    const lastRecT = recsT[recsT.length - 1];
+                    const stT = stints[car.id];
+                    // contrôle technique à compléter : la voiture a quitté les stands et la fiche n'est pas encore "envoyée"
+                    const techPending = !!(myCar && lastRecT && stT && stT.lastExitAt && stT.lastExitAt > lastRecT.ts && techAck[car.id] !== lastRecT.id);
                     return (
                       <div
                         key={car.id}
@@ -3819,6 +4139,34 @@ export default function PitBoard() {
                             )}
                           </button>
 
+                          {/* team manager : boutons raccourcis (fenêtres) */}
+                          {myCar && !compact && (
+                            <div className="grid grid-cols-3 gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => setModal("announce")}
+                                className="rounded-lg px-2 py-2 text-[11px] font-black uppercase tracking-wide bg-white text-black hover:bg-white/90"
+                              >
+                                📣 Annoncer un arrêt
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setModal("message")}
+                                className="rounded-lg px-2 py-2 text-[11px] font-black uppercase tracking-wide bg-white/15 text-white hover:bg-white/25"
+                              >
+                                ✉ Message
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setModal("tech")}
+                                className="rounded-lg px-2 py-2 text-[11px] font-black uppercase tracking-wide bg-white/15 text-white hover:bg-white/25"
+                                style={techPending ? { animation: "pbblink 0.9s infinite" } : undefined}
+                              >
+                                🔧 Contrôle technique{techPending ? " !" : ""}
+                              </button>
+                            </div>
+                          )}
+
                           {/* APERÇU toujours visible */}
                           {call ? (
                             <div className="text-center py-0.5">
@@ -3835,11 +4183,17 @@ export default function PitBoard() {
                             </div>
                           ) : (
                             !expanded &&
-                            !recapView && (
+                            !recapView &&
+                            !myCar && (
                               <div className="text-center text-white/40 text-xs py-2">
                                 Cliquer pour annoncer un arrêt
                               </div>
                             )
+                          )}
+
+                          {/* team manager : Entrée / points sur le circuit / quitte les stands, sans ouvrir la tuile */}
+                          {myCar && !compact && callControls && (
+                            <div className="flex flex-col gap-1.5 rounded bg-white/5 px-2 py-1.5">{callControls}</div>
                           )}
 
                           {/* PILOTE DU RELAIS + temps de roulage cumulé (toujours visible, sauf en vue récap) */}
@@ -3849,6 +4203,20 @@ export default function PitBoard() {
                               canEdit={canEdit}
                               onSet={(n, driverId) => confirmRelayDriver(car.id, n, driverId)}
                             />
+                          )}
+
+                          {/* team manager : informations de tous les pilotes dans un menu déroulant */}
+                          {myCar && ds && !compact && (
+                            <div className="flex flex-col gap-1">
+                              <button
+                                type="button"
+                                onClick={() => setDriversOpen((o) => !o)}
+                                className="flex items-center justify-between rounded bg-white/10 hover:bg-white/15 px-2 py-1 text-left text-[10px] font-black uppercase tracking-wide text-white/80"
+                              >
+                                <span>{driversOpen ? "▾" : "▸"} Pilotes : temps de roulage et meilleurs temps ({ds.cfg.list.length})</span>
+                              </button>
+                              {driversOpen && <DriversTimes ds={ds} hasLive={!!liveFor(car)} />}
+                            </div>
                           )}
 
                           {/* RC visant cette voiture */}
@@ -3864,18 +4232,27 @@ export default function PitBoard() {
 
                           {/* LIVE RIS : temps de course, intermédiaires, voisins au classement */}
                           {!compact && liveInfo && liveInfo.relayAlive && liveFor(car) && (
-                            <LiveBlock
-                              info={liveInfo}
-                              live={liveFor(car)}
-                              num={normalizeCarNumber(car.numero)}
-                              now={now}
-                              showTable={expanded || !!myCar}
-                              driverBest={
-                                ds && ds.curDriver
-                                  ? { name: driverName(ds.curDriver), best: ds.cfg.best[ds.curDriver.id] }
-                                  : null
-                              }
-                            />
+                            <>
+                              <LiveBlock
+                                info={liveInfo}
+                                live={liveFor(car)}
+                                num={normalizeCarNumber(car.numero)}
+                                now={now}
+                                showTable={expanded || !!myCar}
+                                part={myCar ? "stats" : "all"}
+                                driverBest={
+                                  ds && ds.curDriver
+                                    ? { name: driverName(ds.curDriver), best: ds.cfg.best[ds.curDriver.id] }
+                                    : null
+                                }
+                              />
+                              {/* team manager : alertes dans la tuile sur écran moyen, dans leur propre colonne sur grand écran */}
+                              {myCar && (
+                                <div className="xl:hidden">
+                                  <LiveBlock info={liveInfo} live={liveFor(car)} num={normalizeCarNumber(car.numero)} now={now} part="alerts" />
+                                </div>
+                              )}
+                            </>
                           )}
 
                           {/* CONTENU AGRANDI */}
@@ -3883,42 +4260,11 @@ export default function PitBoard() {
                             <div className="flex flex-col gap-2 pt-1 border-t border-white/10">
                               {/* TEMPS DE ROULAGE PAR PILOTE */}
                               {ds && (
-                                <div className="text-[10px] text-white/70 flex flex-col gap-0.5">
+                                <div className="flex flex-col gap-0.5">
                                   <div className="text-white/50 uppercase tracking-widest font-bold text-[9px]">
                                     Temps de roulage par pilote
                                   </div>
-                                  {ds.cfg.list.map((p) => {
-                                    const t = ds.totals[p.id];
-                                    const isCur = ds.curDriver && ds.curDriver.id === p.id;
-                                    const bst = ds.cfg.best[p.id];
-                                    return (
-                                      <div key={p.id} className="flex flex-col">
-                                      <div
-                                        className={`flex items-center justify-between gap-2 font-mono ${
-                                          isCur ? "text-white font-bold" : ""
-                                        } ${p.absent ? "opacity-50" : ""}`}
-                                      >
-                                        <span className="truncate font-sans">
-                                          {driverName(p) || "Pilote sans nom"}
-                                          {p.absent ? " (indisp.)" : ""}
-                                        </span>
-                                        <span className="whitespace-nowrap">
-                                          {fmtTimeHMS(t.total)}{" "}
-                                          <span className="text-white/50">
-                                            🟢{fmtTimeHMS(t.vert)} 🟡{fmtTimeHMS(t.jaune)} · {t.relays} rel. · {t.laps} tr
-                                          </span>
-                                        </span>
-                                      </div>
-                                      {liveFor(car) && (
-                                        <div className="font-mono text-[9px] pl-2" style={{ color: "#4da3ff" }}>
-                                          {bst && (bst.lap || bst.s1 || bst.s2 || bst.s3)
-                                            ? `Meilleur tour ${fmtMs(bst.lap)} · S1 ${fmtMs(bst.s1)} · S2 ${fmtMs(bst.s2)} · S3 ${fmtMs(bst.s3)}`
-                                            : <span className="text-white/35">Meilleurs temps : pas encore enregistrés</span>}
-                                        </div>
-                                      )}
-                                      </div>
-                                    );
-                                  })}
+                                  <DriversTimes ds={ds} hasLive={!!liveFor(car)} />
                                 </div>
                               )}
                               {/* CLASSEMENT GÉNÉRAL : éditable directement dans l'encart */}
@@ -4141,90 +4487,7 @@ export default function PitBoard() {
                                 );
                               })()}
                               {call ? (
-                                <>
-                                  {d.phase === "countdown" ? (
-                                    <>
-                                      <div className="flex gap-1.5 flex-wrap">
-                                        <button
-                                          onClick={() => {
-                                            if (!canEdit) return;
-                                            forceArrival(call.id);
-                                            if (soundOnRef.current) {
-                                              speakTrackPoint(audioCtxRef, call.numero, "Entrée");
-                                            }
-                                          }}
-                                          disabled={!canEdit}
-                                          className="flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed"
-                                          style={{ backgroundColor: car.couleur1, color: "#111" }}
-                                        >
-                                          <PlayCircle size={13} /> Entrée
-                                        </button>
-                                      </div>
-                                      <div className="flex gap-1 flex-wrap">
-                                        {TRACK_POINTS.map((p) => (
-                                          <button
-                                            key={p.name}
-                                            onClick={() => {
-                                              adjustCallTime(call.id, p.sec);
-                                              if (soundOnRef.current) {
-                                                speakTrackPoint(audioCtxRef, call.numero, p.name, p.sec);
-                                              }
-                                            }}
-                                            title={`Ajuster à ${fmtTime(p.sec)}`}
-                                            className="px-2 py-0.5 rounded-full text-[10px] font-semibold text-white/80 bg-white/5 border border-white/15 hover:bg-white/15 hover:text-white transition-colors"
-                                          >
-                                            {p.name} <span className="text-white/45">{fmtTime(p.sec)}</span>
-                                          </button>
-                                        ))}
-                                      </div>
-                                    </>
-                                  ) : confirmExitId === call.id ? (
-                                    <div className="flex items-center gap-2">
-                                      <span className="text-white text-xs font-bold">Confirmer ?</span>
-                                      <button
-                                        onClick={() => {
-                                          removeCall(call.id);
-                                          setConfirmExitId(null);
-                                        }}
-                                        className="flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold text-white bg-red-600 hover:bg-red-500 transition-colors"
-                                      >
-                                        <CheckCircle2 size={13} /> Oui, elle sort
-                                      </button>
-                                      <button
-                                        onClick={() => setConfirmExitId(null)}
-                                        className="flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold text-white/80 bg-white/5 border border-white/15 hover:bg-white/15 hover:text-white transition-colors"
-                                      >
-                                        Annuler
-                                      </button>
-                                    </div>
-                                  ) : (
-                                    <button
-                                      onClick={() => canEdit && setConfirmExitId(call.id)}
-                                      disabled={!canEdit}
-                                      className="self-start flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold text-white/85 bg-white/5 border border-white/15 hover:bg-white/15 hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                                    >
-                                      <CheckCircle2 size={13} /> Voiture quitte les stands
-                                    </button>
-                                  )}
-                                  {call.tasks && call.tasks.length > 0 && (
-                                    <div className="flex flex-wrap gap-1">
-                                      {call.tasks.slice(0, 6).map((t, i) => (
-                                        <span
-                                          key={i}
-                                          className="text-[11px] font-semibold text-white bg-white/10 rounded-full px-2 py-0.5"
-                                        >
-                                          {t}
-                                        </span>
-                                      ))}
-                                    </div>
-                                  )}
-                                  <button
-                                    onClick={() => removeCall(call.id)}
-                                    className="self-start flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold text-white/50 hover:text-white"
-                                  >
-                                    <X size={11} /> Annuler l'annonce
-                                  </button>
-                                </>
+                                myCar ? null : callControls
                               ) : (
                                 <div className="text-center text-white/50 text-xs py-2">
                                   Utilisez le formulaire "Annoncer un arrêt" ci-dessus pour cette voiture.
@@ -4270,21 +4533,101 @@ export default function PitBoard() {
                 if (myCar) {
                   const vurl = (settings.carVideos || {})[myCar.id];
                   const hasVideo = typeof vurl === "string" && /^https?:\/\//i.test(vurl.trim());
-                  return (
-                    <div className={hasVideo ? "w-full flex flex-col lg:flex-row gap-3 items-start" : "max-w-xl w-full mx-auto"}>
-                      <div className={hasVideo ? "w-full lg:w-1/2 order-2 lg:order-1" : ""}>
-                        {carTiles.map((t) => renderTile(t))}
-                      </div>
-                      {hasVideo && (
-                        <div
-                          className="w-full lg:w-1/2 order-1 lg:order-2 sticky top-0 z-30 rounded-2xl bg-neutral-900/95 p-2 shadow-lg"
-                        >
-                          <CarVideo url={vurl} always />
+                  const myLive = liveInfo && liveInfo.relayAlive ? liveFor(myCar) : null;
+                  // jauge d'essence (tours restants) et temps du relais du pilote, en évidence au-dessus de la tuile
+                  const stM = stints[myCar.id];
+                  const callM = (carTiles[0] && carTiles[0].call) || null;
+                  const onTrackM = !!(stM && stM.lastExitAt && !(callM && callM.phase === "instand"));
+                  const fuelM = onTrackM ? computeLiveFuelEstimate(myCar.id, now) : null;
+                  const dsM = driverStatsFor(myCar);
+                  const relaySec = onTrackM ? (now - stM.lastExitAt) / 1000 : null;
+                  const fuelColor = fuelM && fuelM.calibrated ? (fuelM.status === "CRITICAL" ? "#ff3b3b" : fuelM.status === "WARNING" ? "#ffd400" : "#4ade80") : "#9ca3af";
+                  const lapsLeft = fuelM && fuelM.calibrated && settings.circuitLengthKm > 0 && fuelM.autonomyKm ? fuelM.autonomyKm / settings.circuitLengthKm : null;
+                  const topBar = (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-2">
+                      <div className="rounded-xl bg-black/70 border-2 px-3 py-1" style={{ borderColor: fuelColor }}>
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-white/70 text-[11px] font-black uppercase tracking-widest">⛽ Jauge d'essence</span>
+                          {fuelM && fuelM.calibrated && (
+                            <span className="font-mono text-sm font-black" style={{ color: fuelColor }}>
+                              {fuelM.fuelRemaining.toFixed(1)} L · {fuelM.pct.toFixed(0)} %
+                            </span>
+                          )}
                         </div>
-                      )}
+                        {fuelM && fuelM.calibrated ? (
+                          <>
+                            <div className="h-2 rounded-full bg-white/15 overflow-hidden my-1">
+                              <div className="h-full rounded-full" style={{ width: `${Math.max(2, Math.min(100, fuelM.pct))}%`, backgroundColor: fuelColor }} />
+                            </div>
+                            <div className="flex items-baseline gap-2 text-white">
+                              <span className="font-black leading-none" style={{ fontSize: 26, color: fuelColor }}>
+                                {lapsLeft != null ? lapsLeft.toFixed(1) : fuelM.autonomyKm ? fuelM.autonomyKm.toFixed(0) : "?"}
+                              </span>
+                              <span className="text-sm font-bold">{lapsLeft != null ? "tours restants" : "km restants"}</span>
+                              <span className="ml-auto font-mono text-sm text-white/70">{fuelM.autonomyMin ? fmtTimeHMS(fuelM.autonomyMin * 60) : ""}</span>
+                            </div>
+                          </>
+                        ) : (
+                          <div className="text-white/50 text-xs py-1">
+                            {onTrackM ? "Calibration insuffisante : enregistrez un ravitaillement dans le contrôle technique." : "Voiture au stand : la jauge repart à la sortie."}
+                          </div>
+                        )}
+                      </div>
+                      <div className="rounded-xl bg-black/70 border-2 border-white/40 px-3 py-1">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-white/70 text-[11px] font-black uppercase tracking-widest">⏱ Relais du pilote</span>
+                          <span className="text-white/60 text-xs font-bold">Relais {((stM && stM.log) || []).length + 1}</span>
+                        </div>
+                        <div className="flex items-baseline gap-3 text-white">
+                          <span className="font-mono font-black leading-none" style={{ fontSize: 26 }}>
+                            {relaySec != null ? fmtTimeHMS(relaySec) : "--:--:--"}
+                          </span>
+                          <span className="text-base font-black truncate">
+                            {dsM && dsM.curDriver ? driverName(dsM.curDriver) || "Pilote sans nom" : ""}
+                          </span>
+                        </div>
+                        {dsM && dsM.curDriver && dsM.totals[dsM.curDriver.id] && (
+                          <div className="text-white/60 text-[11px] font-mono">
+                            Total roulage pilote : {fmtTimeHMS(dsM.totals[dsM.curDriver.id].total)}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   );
+                  return (
+                    <>
+                    {topBar}
+                    <div className="w-full grid gap-3 items-start grid-cols-1 lg:grid-cols-[58%_minmax(0,1fr)] xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)_minmax(0,1.1fr)]">
+                      <div className="w-full order-2 lg:order-1">{carTiles.map((t) => renderTile(t))}</div>
+                      {myLive && (
+                        <div className="hidden xl:block order-2 sticky top-0">
+                          <LiveBlock info={liveInfo} live={myLive} num={normalizeCarNumber(myCar.numero)} now={now} part="alerts" big />
+                        </div>
+                      )}
+                      <div className="order-1 lg:order-3 max-lg:contents lg:sticky lg:top-0 lg:flex lg:flex-col lg:gap-2">
+                        {hasVideo && (
+                          <div className="w-full max-w-[460px] max-lg:max-w-[260px] max-lg:mx-auto max-lg:sticky max-lg:top-0 max-lg:z-30 max-lg:order-1 rounded-2xl bg-neutral-900/95 p-2 shadow-lg">
+                            <CarVideo url={vurl} always />
+                          </div>
+                        )}
+                        {myLive && (
+                          <div className="w-full max-lg:order-3">
+                            <LiveBlock
+                              info={liveInfo}
+                              live={myLive}
+                              num={normalizeCarNumber(myCar.numero)}
+                              now={now}
+                              showTable
+                              part="table"
+                            />
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    </>
+                  );
                 }
+
                 return chunkArray(carTiles, 3).map((row, rowIdx) => (
                   <div
                     key={rowIdx}
@@ -4343,6 +4686,7 @@ export default function PitBoard() {
 
 
         {/* ANNONCER UN ARRÊT (fenêtre fixe) */}
+        <PanelHost modal={!!myCar} open={modal === "announce"} onClose={() => setModal(null)} title="Annoncer un arrêt">
         <div className="rounded-lg border-2 border-black/30 mb-4 p-3 bg-black/40">
           <h2 className="text-white font-bold tracking-wide uppercase text-xs mb-2 flex items-center gap-2">
             <Plus size={14} /> Annoncer un arrêt
@@ -4458,10 +4802,12 @@ export default function PitBoard() {
             </div>
           )}
         </div>
+        </PanelHost>
 
-        {advancedMode && (
+        {(advancedMode || !!myCar) && (
         <>
         {/* CONTRÔLE TECHNIQUE (fenêtre fixe, reste modifiable même après le départ de la voiture) */}
+        <PanelHost modal={!!myCar} open={modal === "tech"} onClose={() => setModal(null)} title="Contrôle technique">
         <div className="rounded-lg border-2 border-black/30 mb-4 p-3 bg-black/40">
           <h2 className="text-white font-bold tracking-wide uppercase text-xs mb-2 flex items-center gap-2">
             <Settings2 size={14} /> Contrôle technique
@@ -4711,12 +5057,23 @@ export default function PitBoard() {
                     {records.length} fiches enregistrées pour cette voiture depuis le début de l'événement.
                   </p>
                 )}
+                {myCar && (
+                  <button
+                    type="button"
+                    onClick={() => ackTech(car.id, record ? record.id : 0)}
+                    className="self-start px-5 py-2 rounded font-black uppercase tracking-wide text-sm bg-green-500 text-black hover:bg-green-400"
+                  >
+                    ✔ Envoyé
+                  </button>
+                )}
               </div>
             );
           })()}
         </div>
+        </PanelHost>
 
         {/* MESSAGE À L'ÉQUIPE */}
+        <PanelHost modal={!!myCar} open={modal === "message"} onClose={() => setModal(null)} title="Message à l'équipe">
         <div className="rounded-lg border-2 border-black/30 mb-4 p-3 bg-black/40">
           <button
             onClick={() => setShowMessageForm((s) => !s)}
@@ -4779,6 +5136,7 @@ export default function PitBoard() {
           </>
           )}
         </div>
+        </PanelHost>
         </>
         )}
 

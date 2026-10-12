@@ -102,3 +102,213 @@ export function visibleRcMessages(rc, wanted, nowMs, seen, dismissed, generatedA
   });
   return out;
 }
+
+// ---------- Estimation des dépassements (rythme des voitures voisines) ----------
+// mémoire des derniers temps au tour de chaque voiture, alimentée à chaque nouvelle donnée du flux
+const paceStore = {};
+
+// enregistre le dernier tour de chaque voiture (une seule fois par numéro de tour)
+export function updatePace(cars, store = paceStore) {
+  for (const num of Object.keys(cars || {})) {
+    const c = cars[num];
+    if (!c || c.last == null || c.laps == null) continue;
+    const e = store[num] || (store[num] = { lastLap: null, times: [] });
+    if (e.lastLap === c.laps) continue;
+    e.lastLap = c.laps;
+    e.times.push(c.last);
+    if (e.times.length > 8) e.times.shift();
+  }
+}
+
+// rythme (ms/tour) = médiane des derniers tours "normaux" (on écarte les tours > 115 % du meilleur : stand, neutralisation)
+export function paceOf(num, car, store = paceStore) {
+  const times = (store[num] && store[num].times) || [];
+  const ref = car && car.best;
+  const ok = ref ? times.filter((t) => t <= ref * 1.15) : times;
+  if (ok.length >= 2) {
+    const s = ok.slice(-5).sort((a, b) => a - b);
+    return s[Math.floor(s.length / 2)];
+  }
+  if (car && car.last != null) {
+    return ref && car.last > ref * 1.15 ? Math.round(ref * 1.02) : car.last;
+  }
+  return ref ? Math.round(ref * 1.02) : null;
+}
+
+// construit une estimation de contact (null si pas de rapprochement fiable)
+function buildDuel(r, gapMs, closing, myPace, remainingMs) {
+  if (gapMs == null || closing < 50) return null; // moins de 0,05 s/tour : pas de rapprochement fiable
+  const laps = gapMs / closing;
+  const etaMs = laps * myPace;
+  if (laps > 30) return null;
+  if (remainingMs != null && etaMs > remainingMs) return null; // n'arrivera pas avant la fin
+  return {
+    num: r.num,
+    team: r.team,
+    pos: r.pos,
+    gapMs,
+    closingMs: closing,
+    laps,
+    etaMs,
+    level: laps <= 2 ? "high" : laps <= 5 ? "mid" : "low",
+  };
+}
+
+// Qui peut nous dépasser, et qui pouvons-nous rattraper ?  (version "classement" : repli si le flux n'a pas les heures de passage)
+// nb = neighborsOf(...) ; remainingMs = temps de course restant (facultatif)
+export function duelEstimates(nb, remainingMs, store = paceStore) {
+  if (!nb || !nb.me) return null;
+  const myPace = paceOf(nb.me.num, nb.me, store);
+  if (!myPace) return { threats: [], chases: [] };
+  const threats = [];
+  for (const r of nb.below) {
+    const p = paceOf(r.num, r, store);
+    const t = p && r.gap ? buildDuel(r, r.gap.ms, myPace - p, myPace, remainingMs) : null;
+    if (t) threats.push(t);
+  }
+  const chases = [];
+  for (const r of [...nb.above].reverse()) {
+    const p = paceOf(r.num, r, store);
+    const t = p && r.gap ? buildDuel(r, r.gap.ms, p - myPace, myPace, remainingMs) : null;
+    if (t) chases.push(t);
+  }
+  return { threats, chases };
+}
+
+// ---------- Voisins SUR LA PISTE (indépendants du classement) ----------
+// Heure (ms, horloge RIS) à laquelle la voiture franchirait la ligne si elle roulait au rythme de référence
+// depuis son dernier point de chronométrage connu (ligne, S1 ou S2). Sert à situer chaque voiture sur le tour.
+export function linePhase(c, ref) {
+  if (!c || c.lapEnd == null) return null;
+  let T = c.lapEnd;
+  const s1ok = c.s1 != null && ref.s1b != null && c.s1 <= ref.s1b * 1.6; // un S1 énorme = tour de stand : on l'ignore
+  if (s1ok) {
+    T = c.lapEnd + c.s1;
+    const o1 = ref.s1b;
+    const s2ok = c.s2 != null && ref.s2b != null && c.s2 <= ref.s2b * 1.6;
+    if (s2ok) return c.lapEnd + c.s1 + c.s2 - (o1 + ref.s2b);
+    return T - o1;
+  }
+  return T;
+}
+
+const OFF_TRACK = /FUEL|PIT|STOP|OUT|GARAGE/i; // voiture au stand : pas une voiture "de piste"
+
+// toutes les voitures proches de nous sur la piste, quel que soit leur classement.
+// renvoie [{ num, team, pos, d }] avec d en ms : d > 0 = derrière nous sur la piste, d < 0 = devant nous. null si les heures de passage manquent.
+export function onTrackNeighbors(cars, myNum, myPace, windowMs = 90000) {
+  const me = cars && cars[myNum];
+  if (!me || !myPace) return null;
+  const myPhase = linePhase(me, me);
+  if (myPhase == null) return null;
+  const out = [];
+  let seen = 0;
+  for (const num of Object.keys(cars)) {
+    if (num === myNum) continue;
+    const c = cars[num];
+    if (!c || OFF_TRACK.test(c.state || "")) continue;
+    const ph = linePhase(c, me);
+    if (ph == null) continue;
+    seen++;
+    let d = (((ph - myPhase) % myPace) + myPace) % myPace; // retard (ms) de l'autre au passage de la ligne
+    if (d > myPace / 2) d -= myPace;
+    if (Math.abs(d) <= windowMs) out.push({ num, team: c.team, pos: c.pos, d, car: c });
+  }
+  return seen ? out : null;
+}
+
+// Estimation des contacts avec TOUTES les voitures proches sur la piste (devant et derrière), du plus rapide à venir au plus lent.
+// renvoie { threats, chases, onTrack: true } ou null si le flux ne contient pas les heures de passage (-> repli classement)
+export function duelEstimatesTrack(cars, myNum, remainingMs, store = paceStore, windowMs = 90000) {
+  const me = cars && cars[myNum];
+  if (!me) return null;
+  const myPace = paceOf(myNum, me, store);
+  if (!myPace) return null;
+  const near = onTrackNeighbors(cars, myNum, myPace, windowMs);
+  if (!near) return null;
+  const threats = [];
+  const chases = [];
+  for (const r of near) {
+    const p = paceOf(r.num, r.car, store);
+    if (!p) continue;
+    if (r.d > 0) {
+      const t = buildDuel(r, r.d, myPace - p, myPace, remainingMs); // derrière nous et plus rapide
+      if (t) threats.push(t);
+    } else if (r.d < 0) {
+      const t = buildDuel(r, -r.d, p - myPace, myPace, remainingMs); // devant nous et plus lent
+      if (t) chases.push(t);
+    }
+  }
+  return { threats, chases, onTrack: true };
+}
+
+// ---------- Compte à rebours ----------
+// L'heure estimée du contact (etaAt) est recalée chaque fois que l'écart change (franchissement d'un intermédiaire / de la ligne),
+// puis le compte à rebours s'écoule seconde par seconde jusqu'à la prochaine mise à jour.
+const anchorStore = {};
+export function anchorEta(key, sig, etaMs, nowMs, store = anchorStore) {
+  const a = store[key];
+  if (!a || a.sig !== sig) {
+    store[key] = { sig, etaAt: nowMs + etaMs };
+  }
+  return store[key].etaAt;
+}
+
+// 125000 -> "2:05" ; 3725000 -> "1:02:05"
+export function fmtCountdown(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = String(s % 60).padStart(2, "0");
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${sec}` : `${m}:${sec}`;
+}
+
+// liste unique, la plus proche en premier : { dir: "threat" | "chase", ..., etaAt, remainingMs }
+export function prioritizedDuels(duel, nowMs, store = anchorStore) {
+  if (!duel) return [];
+  const all = [
+    ...duel.threats.map((d) => ({ ...d, dir: "threat" })),
+    ...duel.chases.map((d) => ({ ...d, dir: "chase" })),
+  ].map((d) => {
+    const etaAt = anchorEta(d.dir + d.num, Math.round(d.gapMs) + "|" + Math.round(d.closingMs / 10), d.etaMs, nowMs, store);
+    return { ...d, etaAt, remainingMs: Math.max(0, etaAt - nowMs) };
+  });
+  return all.sort((a, b) => a.remainingMs - b.remainingMs);
+}
+
+// ---------- Zones "3 devant / 3 derrière au classement" ----------
+// Pour chacune des 3 voitures devant et des 3 derrière nous au général : écart, différence de rythme, compte à rebours.
+// renvoie { ahead: [...], behind: [...] } ; chaque ligne : { num, team, pos, gapMs | gapLaps, diffMs, laps, etaAt, remainingMs, kind }
+// kind : "closing" (le contact approche) | "away" (l'écart grandit) | "lapped" (un tour ou plus d'écart) | "unknown"
+export function classDuels(nb, remainingMs, nowMs, store = paceStore, anchors = anchorStore) {
+  if (!nb || !nb.me) return null;
+  const myPace = paceOf(nb.me.num, nb.me, store);
+  const row = (r, dir) => {
+    const base = { num: r.num, team: r.team, pos: r.pos, dir };
+    if (!r.gap) return { ...base, kind: "unknown" };
+    if (r.gap.laps) return { ...base, kind: "lapped", gapLaps: r.gap.laps };
+    const p = paceOf(r.num, r, store);
+    if (!myPace || !p || r.gap.ms == null) return { ...base, kind: "unknown", gapMs: r.gap.ms };
+    // diffMs > 0 : le contact se rapproche (derrière : l'autre est plus rapide ; devant : nous sommes plus rapides)
+    const diffMs = dir === "behind" ? myPace - p : p - myPace;
+    if (diffMs < 50) return { ...base, kind: "away", gapMs: r.gap.ms, diffMs };
+    const laps = r.gap.ms / diffMs;
+    const etaMs = laps * myPace;
+    if (laps > 60 || (remainingMs != null && etaMs > remainingMs)) return { ...base, kind: "away", gapMs: r.gap.ms, diffMs, farOff: true };
+    const etaAt = anchorEta("z" + dir + r.num, Math.round(r.gap.ms) + "|" + Math.round(diffMs / 10), etaMs, nowMs, anchors);
+    return {
+      ...base,
+      kind: "closing",
+      gapMs: r.gap.ms,
+      diffMs,
+      laps,
+      etaAt,
+      remainingMs: Math.max(0, etaAt - nowMs),
+      level: laps <= 2 ? "high" : laps <= 5 ? "mid" : "low",
+    };
+  };
+  return {
+    ahead: [...nb.above].reverse().map((r) => row(r, "ahead")), // la plus proche d'abord
+    behind: nb.below.map((r) => row(r, "behind")),
+  };
+}

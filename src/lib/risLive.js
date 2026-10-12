@@ -108,6 +108,7 @@ export function parseLiveTiming(raw) {
       s3b: asMs(lap.s3_best_ms),
       best: asMs(lap.best_lap_ms),
       last: asMs(lap.lap_time_ms),
+      lapEnd: Number.isFinite(Date.parse(lap.lap_end)) ? Date.parse(lap.lap_end) : null, // dernier passage de la ligne (ms epoch, horloge RIS)
       gl: asMs(gl.ms), // écart au leader (ms)
       gll: asNonNegativeInt(gl.laps), // tours de retard sur le leader
       ia: asMs(ia.ms), // écart avec la voiture devant (ms)
