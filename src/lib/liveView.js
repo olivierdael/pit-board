@@ -195,7 +195,14 @@ export function linePhase(c, ref) {
   return T;
 }
 
-const OFF_TRACK = /FUEL|PIT|STOP|OUT|GARAGE/i; // voiture au stand : pas une voiture "de piste"
+const OFF_TRACK = /FUEL|PIT|STOP|OUT|GARAGE|BOX|STAND|ENTR|PARK/i; // voiture au stand (ou qui y entre / en sort) : pas une voiture "de piste"
+
+// médiane des derniers tours de toutes les voitures : sert à repérer un tour de stand (très long par rapport aux autres),
+// sans éliminer tout le monde pendant une neutralisation où tous roulent lentement
+function medianLast(cars) {
+  const v = Object.values(cars || {}).map((c) => c && c.last).filter((x) => x != null && x > 0).sort((a, b) => a - b);
+  return v.length ? v[Math.floor(v.length / 2)] : null;
+}
 
 // toutes les voitures proches de nous sur la piste, quel que soit leur classement.
 // renvoie [{ num, team, pos, d }] avec d en ms : d > 0 = derrière nous sur la piste, d < 0 = devant nous. null si les heures de passage manquent.
@@ -206,10 +213,12 @@ export function onTrackNeighbors(cars, myNum, myPace, windowMs = 90000) {
   if (myPhase == null) return null;
   const out = [];
   let seen = 0;
+  const med = medianLast(cars);
   for (const num of Object.keys(cars)) {
     if (num === myNum) continue;
     const c = cars[num];
     if (!c || OFF_TRACK.test(c.state || "")) continue;
+    if (med && c.last != null && c.last > med * 1.35 && (c.pits || 0) > 0) continue; // tour d'entrée / de sortie des stands : on l'écarte
     const ph = linePhase(c, me);
     if (ph == null) continue;
     seen++;
@@ -322,7 +331,7 @@ export function classDuels(nb, remainingMs, nowMs, store = paceStore, anchors = 
 //     "slow"  : plus lente de 20 s/tour ou plus -> orange « SLOW CAR », dans les 20 s
 //     "soon"  : plus lente de 5 à 20 s/tour -> jaune, dans les 15 s
 //     "calm"  : plus lente de 0 à 5 s/tour -> vert, dans les 10 s
-//   Voitures qui vont nous dépasser, dans les 15 s :
+//   Voitures qui vont nous dépasser, dans la minute (affichage normal jusqu'à 30 s, plus petit entre 30 s et 1 min) :
 //     "fast"   : au moins 10 s/tour plus rapide -> bande rouge « FAST CAR »
 //     "direct" : classée derrière nous au général et moins de 2 s/tour plus rapide -> bande rouge « CONCURRENT DIRECT »
 //     "threat" : les autres -> orange, sans mention
@@ -334,12 +343,12 @@ export function trackAlertRows(prio, myPos = null) {
       if (d.closingMs >= 20000) kind = d.remainingMs <= 20000 ? "slow" : null;
       else if (d.closingMs >= 5000) kind = d.remainingMs <= 15000 ? "soon" : null;
       else kind = d.remainingMs <= 10000 ? "calm" : null;
-    } else if (d.remainingMs <= 15000) {
+    } else if (d.remainingMs <= 60000) {
       if (d.closingMs >= 10000) kind = "fast";
       else if (myPos != null && d.pos != null && d.pos > myPos && d.closingMs < 2000) kind = "direct";
       else kind = "threat";
     }
-    if (kind) out.push({ ...d, kind });
+    if (kind) out.push({ ...d, kind, small: d.dir === "threat" && d.remainingMs > 30000 });
   }
   return out;
 }

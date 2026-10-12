@@ -763,6 +763,63 @@ function DraftInput({ value, onCommit, placeholder, className, disabled }) {
   );
 }
 
+// Essais : encart "consommation". Le réservoir est plein au départ ; à la fin on remet du carburant et on saisit les litres :
+// consommation = litres / distance parcourue (temps de roulage vert et jaune, vitesses moyennes des réglages).
+function EssaisConsoCard({ run, tankL, lapsKm, savedValue, onSave }) {
+  const [added, setAdded] = useState("");
+  const [saved, setSaved] = useState(false);
+  const litres = parseFloat(String(added).replace(",", "."));
+  const okL = Number.isFinite(litres) && litres > 0;
+  const consTime = okL && run.distance > 0 ? (litres / run.distance) * 100 : null;
+  const consLaps = okL && lapsKm > 0 ? (litres / lapsKm) * 100 : null;
+  return (
+    <div className="rounded-xl bg-black/80 border-2 border-[#ffd400] px-3 py-1.5 flex flex-col gap-1">
+      <div className="flex items-center gap-3 flex-wrap text-white">
+        <span className="text-sm font-black uppercase tracking-wide whitespace-nowrap">⛽ Essais · plein de {tankL} L au départ</span>
+        <span className="font-mono text-sm font-bold whitespace-nowrap">
+          Roulage {fmtTimeHMS(run.vertSec + run.jauneSec)} 🟢{fmtTimeHMS(run.vertSec)} 🟡{fmtTimeHMS(run.jauneSec)}
+        </span>
+        <span className="font-mono text-sm font-bold whitespace-nowrap">≈ {run.distance.toFixed(1)} km</span>
+        {lapsKm > 0 && <span className="font-mono text-xs text-white/70 whitespace-nowrap">({lapsKm.toFixed(1)} km en tours × circuit)</span>}
+      </div>
+      <div className="flex items-center gap-2 flex-wrap text-white">
+        <label className="flex items-center gap-2 text-sm font-bold">
+          Litres remis au plein final
+          <input
+            type="text"
+            inputMode="decimal"
+            value={added}
+            onChange={(e) => {
+              setAdded(e.target.value);
+              setSaved(false);
+            }}
+            placeholder="ex. 12,5"
+            className="w-24 px-2 py-1 rounded bg-white text-black font-mono font-bold text-base"
+          />
+          L
+        </label>
+        <span className="font-mono text-lg font-black whitespace-nowrap" style={{ color: "#ffd400" }}>
+          {consTime != null ? `${consTime.toFixed(1)} L/100 km` : "– L/100 km"}
+        </span>
+        {consLaps != null && <span className="font-mono text-xs text-white/70 whitespace-nowrap">({consLaps.toFixed(1)} avec les tours)</span>}
+        <button
+          type="button"
+          disabled={consTime == null || consTime < 3 || consTime > 80}
+          onClick={() => {
+            onSave(consTime.toFixed(1));
+            setSaved(true);
+          }}
+          className="px-3 py-1 rounded font-black uppercase text-xs bg-[#ffd400] text-black disabled:opacity-35"
+        >
+          Enregistrer dans la voiture
+        </button>
+        {saved && <span className="text-xs font-bold text-green-400">✓ enregistré</span>}
+        {!saved && savedValue ? <span className="text-xs text-white/60">config actuelle : {savedValue} L/100 km</span> : null}
+      </div>
+    </div>
+  );
+}
+
 // Ligne sur une seule ligne dont la police se réduit automatiquement pour que tout le texte tienne dans la largeur
 function FitLine({ children, max = 16, min = 8, className = "", style }) {
   const ref = useRef(null);
@@ -820,14 +877,14 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", 
     return (
       <div
         key={d.dir + d.num}
-        className={`font-sans font-black leading-tight rounded px-2 py-1 flex items-center justify-between gap-2 ${st.blink ? "animate-pulse" : ""}`}
+        className={`font-sans font-black leading-tight rounded px-2 ${d.small ? "py-0.5" : "py-1"} flex items-center justify-between gap-2 ${st.blink ? "animate-pulse" : ""}`}
         style={{ backgroundColor: st.bg, color: st.fg }}
       >
-        <FitLine max={large ? fs(15) : fs(12)} min={8} className="flex-1">
+        <FitLine max={d.small ? fs(10) : large ? fs(15) : fs(12)} min={8} className="flex-1">
           {st.label ? `${st.label} · ` : ""}{d.pos ? `P${d.pos} ` : ""}#{d.num} {d.team} · {fmtGapMs(d.gapMs)} · {threat ? "−" : "+"}
           {(d.closingMs / 1000).toFixed(1)} s/t
         </FitLine>
-        {cd(d.remainingMs, fs(large ? 20 : 14))}
+        {cd(d.remainingMs, fs(d.small ? 11 : large ? 20 : 14))}
       </div>
     );
   };
@@ -977,7 +1034,7 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", 
               <>
                 {[
                   { key: "chase", title: "🏁 Estimation avant dépassement", color: "#facc15", rows: urgent.filter((d) => d.dir === "chase"), none: "Aucune voiture à dépasser dans l'immédiat" },
-                  { key: "threat", title: "🏁 Estimation avant de nous faire dépasser", color: "#38bdf8", rows: urgent.filter((d) => d.dir === "threat"), none: "Personne ne vient nous dépasser dans l'immédiat" },
+                  { key: "threat", title: "🏁 Estimation avant de nous faire dépasser", color: "#38bdf8", rows: urgent.filter((d) => d.dir === "threat").sort((a, b) => (a.small ? 1 : 0) - (b.small ? 1 : 0) || a.remainingMs - b.remainingMs), none: "Personne ne vient nous dépasser dans l'immédiat" },
                 ].map((box) => (
                   <div key={box.key} className="rounded-lg p-1.5 flex flex-col gap-1 bg-black/40" style={{ border: `2px solid ${box.color}` }}>
                     <span className="font-black uppercase tracking-wide font-sans" style={{ color: box.color, fontSize: fs(12) }}>{box.title}</span>
@@ -1540,6 +1597,41 @@ export default function PitBoard() {
     );
     return visibleRcMessages(liveInfo.rc, wanted, now, rcSeenRef.current, rcDismissed, liveInfo.generatedAt);
   }, [settings.liveEnabled, liveInfo, role, myCar, allConfiguredCars, now, rcDismissed]);
+  // alerte "Full course yellow" annoncée par la direction de course (message RC) : écran jaune/noir qui clignote + annonce vocale,
+  // même si le drapeau jaune n'a pas été activé à la main. Les messages déjà présents au chargement ne déclenchent rien.
+  const rcAlertSeenRef = useRef(null);
+  const rcFcyOnRef = useRef(false);
+  const [rcFcyUntil, setRcFcyUntil] = useState(0);
+  const fcyActive = now < rcFcyUntil;
+  useEffect(() => {
+    if (!settings.liveEnabled || !liveInfo) return;
+    const list = liveInfo.rc || [];
+    const keyOf = (e) => `${e.id}|${e.message}`;
+    if (rcAlertSeenRef.current === null) {
+      rcAlertSeenRef.current = new Set(list.map(keyOf));
+      return;
+    }
+    list.forEach((e) => {
+      const k = keyOf(e);
+      if (rcAlertSeenRef.current.has(k)) return;
+      rcAlertSeenRef.current.add(k);
+      const msg = String(e.message || "");
+      const flagYellow = lastKnownFlagRef.current === "jaune";
+      if (/(END|ENDING|TERMIN|GREEN|RESUM)/i.test(msg) && /(FULL\s*COURSE|GREEN\s*FLAG|SAFETY\s*CAR|CODE\s*60)/i.test(msg)) {
+        if (rcFcyOnRef.current && soundOnRef.current && !flagYellow) speakYellowAlert(audioCtxRef, "Full course yellow terminé! Full course yellow terminé!");
+        rcFcyOnRef.current = false;
+      } else if (/GREEN\s*FLAG/i.test(msg)) {
+        if (rcFcyOnRef.current && soundOnRef.current && !flagYellow) speakYellowAlert(audioCtxRef, "Full course yellow terminé! Full course yellow terminé!");
+        rcFcyOnRef.current = false;
+      } else if (/FULL\s*COURSE\s*YELLOW|\bFCY\b|SAFETY\s*CAR|CODE\s*60/i.test(msg)) {
+        rcFcyOnRef.current = true;
+        setRcFcyUntil(Date.now() + 12000);
+        if (soundOnRef.current && !flagYellow) speakYellowAlert(audioCtxRef, "Full course yellow! Full course yellow!");
+      } else if (/RED\s*FLAG/i.test(msg)) {
+        if (soundOnRef.current && lastKnownFlagRef.current !== "rouge") speakYellowAlert(audioCtxRef, "Red Flag! Red Flag!");
+      }
+    });
+  }, [liveInfo, settings.liveEnabled]);
   // message RC visé par numéro de voiture (pour la tuile de cette voiture)
   function rcForCar(car) {
     const n = String(Number(normalizeCarNumber(car.numero)));
@@ -1642,13 +1734,13 @@ export default function PitBoard() {
 
   // clignotement du drapeau jaune
   useEffect(() => {
-    if (flag !== "jaune") {
+    if (flag !== "jaune" && !fcyActive) {
       setFlash(false);
       return;
     }
     const t = setInterval(() => setFlash((f) => !f), 450);
     return () => clearInterval(t);
-  }, [flag]);
+  }, [flag, fcyActive]);
 
   // --- SYNCHRONISATION SUPABASE (chargement initial + Realtime) ---
   useEffect(() => {
@@ -2488,7 +2580,7 @@ export default function PitBoard() {
     if (samples.length === 0) {
       // course en cours et aucune donnée de relais encore calibrée : on démarre avec la
       // consommation initiale propre à cette voiture, dès le relais 1
-      if (settings.eventType === "course") {
+      {
         const car = cars.find((c) => c.id === carId);
         const initial = car ? Number(car.initialConsoL100) : NaN;
         if (!isNaN(initial) && initial > 0) {
@@ -2597,6 +2689,32 @@ export default function PitBoard() {
       status,
       n: model.n,
     };
+  }
+
+  // essais : distance et temps de roulage cumulés depuis le plein de départ (ou le dernier ravitaillement enregistré)
+  function computeEssaisRun(carId, nowMs) {
+    const st = stints[carId];
+    const log = (st && st.log) || [];
+    let startIdx = 0;
+    for (let i = log.length - 1; i >= 0; i--) {
+      if (log[i].refueled) {
+        startIdx = i + 1;
+        break;
+      }
+    }
+    let vertSec = 0;
+    let jauneSec = 0;
+    for (let i = startIdx; i < log.length; i++) {
+      vertSec += log[i].vertSec || 0;
+      jauneSec += log[i].jauneSec || 0;
+    }
+    if (st && st.lastExitAt) {
+      const split = computeFlagSplit(st.lastExitAt, nowMs, flagHistory);
+      vertSec += split.vertSec;
+      jauneSec += split.jauneSec;
+    }
+    const distance = (vertSec / 3600) * settings.greenSpeedKmh + (jauneSec / 3600) * settings.yellowSpeedKmh;
+    return { vertSec, jauneSec, distance };
   }
 
   function logStintEnd(carId, refueled) {
@@ -2880,7 +2998,7 @@ export default function PitBoard() {
 
   const theme = FLAGS[flag];
   const bgStyle =
-    flag === "jaune"
+    flag === "jaune" || fcyActive
       ? flash
         ? { backgroundColor: "#111111", backgroundImage: "none" }
         : { backgroundColor: "#ffd400", backgroundImage: "none" }
@@ -3227,6 +3345,19 @@ export default function PitBoard() {
     >
       <div className={`max-w-7xl mx-auto px-3 pb-20 ${myCar ? "py-2" : "py-4"}`}>
         <style>{"@keyframes pbblink{0%,100%{background:#ff1f1f;color:#fff}50%{background:#ffe600;color:#000}}"}</style>
+        {fcyActive && (
+          <div
+            className="fixed inset-x-0 top-0 z-[60] pointer-events-none flex items-center justify-center py-3 text-3xl font-black uppercase tracking-widest"
+            style={{
+              backgroundImage: "repeating-linear-gradient(45deg,#ffd400 0px,#ffd400 26px,#000 26px,#000 52px)",
+              color: flash ? "#000" : "#fff",
+              textShadow: flash ? "0 0 0 #fff" : "0 0 6px #000, 2px 2px 0 #000",
+              opacity: flash ? 1 : 0.85,
+            }}
+          >
+            <span className="bg-black text-[#ffd400] px-6 py-1 rounded">⚠ FULL COURSE YELLOW</span>
+          </div>
+        )}
         {/* EN-TÊTE + HORLOGE + DÉCOMPTE + BOUTONS (une seule ligne) */}
         <div className={`flex items-center justify-between gap-x-3 gap-y-1 flex-wrap ${myCar ? "mb-2" : "mb-4"} relative overflow-hidden rounded-lg pl-6 pr-3 py-1.5 border-b-4 border-[#e10600]`} style={{ background: "linear-gradient(100deg,#050505 0%,#141414 55%,#2a0505 100%)" }}>
           <div
@@ -4598,8 +4729,18 @@ export default function PitBoard() {
                   const fuelColor = fuelM && fuelM.calibrated ? (fuelM.status === "CRITICAL" ? "#ff3b3b" : fuelM.status === "WARNING" ? "#ffd400" : "#4ade80") : "#9ca3af";
                   const lapsLeft = fuelM && fuelM.calibrated && settings.circuitLengthKm > 0 && fuelM.autonomyKm ? fuelM.autonomyKm / settings.circuitLengthKm : null;
                   const dsT = dsM && dsM.curDriver ? dsM.totals[dsM.curDriver.id] : null;
+                  const essaisM = settings.eventType !== "course";
                   const topBar = (
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-2">
+                      {essaisM ? (
+                        <EssaisConsoCard
+                          run={computeEssaisRun(myCar.id, now)}
+                          tankL={settings.tankCapacityL}
+                          lapsKm={myLive && myLive.laps != null && settings.circuitLengthKm > 0 ? myLive.laps * settings.circuitLengthKm : 0}
+                          savedValue={myCar.initialConsoL100}
+                          onSave={(v) => updateCar(myCar.id, "initialConsoL100", v)}
+                        />
+                      ) : (
                       <div className="rounded-xl bg-black/80 border-2 px-3 py-1.5 flex items-center gap-3" style={{ borderColor: fuelColor }}>
                         <span className="text-white text-sm font-black uppercase tracking-wide whitespace-nowrap">⛽ Essence</span>
                         {fuelM && fuelM.calibrated ? (
@@ -4622,6 +4763,7 @@ export default function PitBoard() {
                           </span>
                         )}
                       </div>
+                      )}
                       <div className="rounded-xl bg-black/80 border-2 border-white/50 px-3 py-1.5 flex items-center gap-3">
                         <span className="text-white text-sm font-black uppercase tracking-wide whitespace-nowrap">⏱ Relais {((stM && stM.log) || []).length + 1}</span>
                         <span className="font-mono font-black leading-none text-white whitespace-nowrap" style={{ fontSize: 24 }}>
