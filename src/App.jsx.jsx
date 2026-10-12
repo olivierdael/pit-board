@@ -1321,6 +1321,23 @@ export default function PitBoard() {
   const [showMessageForm, setShowMessageForm] = useState(true);
   const [modal, setModal] = useState(null); // team manager : "announce" | "message" | "tech"
   const [driversOpen, setDriversOpen] = useState(false); // menu déroulant "autres pilotes"
+  // formulaire "Annoncer un arrêt" : l'admin / pit wall peut le masquer (mémorisé sur l'appareil)
+  const [announceHidden, setAnnounceHidden] = useState(() => {
+    try {
+      return localStorage.getItem("pitboard_announce_hidden") === "1";
+    } catch (e) {
+      return false;
+    }
+  });
+  function toggleAnnounce() {
+    setAnnounceHidden((v) => {
+      try {
+        localStorage.setItem("pitboard_announce_hidden", v ? "0" : "1");
+      } catch (e) {}
+      return !v;
+    });
+  }
+  const hideAnnounce = announceHidden && role !== "manager";
   const [techAck, setTechAck] = useState(() => {
     try {
       return JSON.parse(localStorage.getItem("pitboard_techack") || "{}") || {};
@@ -4706,10 +4723,15 @@ export default function PitBoard() {
         {/* ANNONCER UN ARRÊT (fenêtre fixe) */}
         <PanelHost modal={!!myCar} open={modal === "announce"} onClose={() => setModal(null)} title="Annoncer un arrêt">
         <div className="rounded-lg border-2 border-black/30 mb-4 p-3 bg-black/40">
-          <h2 className="text-white font-bold tracking-wide uppercase text-xs mb-2 flex items-center gap-2">
+          <h2
+            className={`text-white font-bold tracking-wide uppercase text-xs flex items-center gap-2 ${hideAnnounce ? "" : "mb-2"} ${myCar ? "" : "cursor-pointer select-none"}`}
+            onClick={myCar ? undefined : toggleAnnounce}
+            title={myCar ? undefined : hideAnnounce ? "Afficher le formulaire" : "Masquer le formulaire"}
+          >
             <Plus size={14} /> Annoncer un arrêt
+            {!myCar && <span className="ml-auto text-white/60 normal-case font-semibold">{hideAnnounce ? "▸ Afficher" : "▾ Masquer"}</span>}
           </h2>
-          {configuredCars.length === 0 ? (
+          {hideAnnounce ? null : configuredCars.length === 0 ? (
             <p className="text-white/70 text-sm">
               Encodez au moins une voiture ci-dessous pour créer une annonce.
             </p>
