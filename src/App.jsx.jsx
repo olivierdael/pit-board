@@ -4083,6 +4083,26 @@ export default function PitBoard() {
                             compact ? "p-2 gap-1" : "p-3 gap-2"
                           }`}
                         >
+                          {/* ALERTES RC : tout en haut de la tuile, entre le bord et le nom du pilote */}
+                          {(myCar ? rcMessages : rcForCar(car)).map((m) => (
+                            <div
+                              key={m.key}
+                              className="rounded px-2 py-1 text-white font-black text-xs leading-snug flex items-start justify-between gap-2"
+                              style={{ backgroundColor: "#c40000", border: "1px solid #ff4040" }}
+                            >
+                              <span>⚠ RC : {m.message}</span>
+                              {myCar && (
+                                <button
+                                  onClick={() => setRcDismissed((prev) => new Set(prev).add(m.key))}
+                                  className="text-white/80 hover:text-white flex-shrink-0"
+                                  title="Masquer ce message"
+                                >
+                                  <X size={14} />
+                                </button>
+                              )}
+                            </div>
+                          ))}
+
                           {/* EN-TÊTE cliquable : agrandit / réduit l'encart */}
                           <button
                             onClick={() => toggleExpand(car.id)}
@@ -4222,26 +4242,6 @@ export default function PitBoard() {
                               {driversOpen && <DriversTimes ds={ds} hasLive={!!liveFor(car)} />}
                             </div>
                           )}
-
-                          {/* RC visant cette voiture */}
-                          {(myCar ? rcMessages : rcForCar(car)).map((m) => (
-                            <div
-                              key={m.key}
-                              className="rounded px-2 py-1 text-white font-black text-xs leading-snug flex items-start justify-between gap-2"
-                              style={{ backgroundColor: "#c40000", border: "1px solid #ff4040" }}
-                            >
-                              <span>⚠ RC : {m.message}</span>
-                              {myCar && (
-                                <button
-                                  onClick={() => setRcDismissed((prev) => new Set(prev).add(m.key))}
-                                  className="text-white/80 hover:text-white flex-shrink-0"
-                                  title="Masquer ce message"
-                                >
-                                  <X size={14} />
-                                </button>
-                              )}
-                            </div>
-                          ))}
 
                           {/* LIVE RIS : temps de course, intermédiaires, voisins au classement */}
                           {!compact && liveInfo && liveInfo.relayAlive && liveFor(car) && (
