@@ -850,7 +850,8 @@ function FitLine({ children, max = 16, min = 8, className = "", style }) {
 
 // Fenêtre « autour de nous » : les voitures devant et derrière nous SUR LA PISTE, avec l'écart exact mesuré au dernier point commun
 function AroundWindow({ data, prio, myPos, onClose }) {
-  const cols = { gridTemplateColumns: "2.4rem 3.2rem minmax(0,1fr) 7rem 8.5rem 3.8rem" };
+  const hasCls = !!data && [...data.ahead, ...data.behind].some((r) => r.cat);
+  const cols = { gridTemplateColumns: hasCls ? "2.4rem 3.2rem 4.6rem 2.6rem minmax(0,1fr) 7rem 8.5rem 3.8rem" : "2.4rem 3.2rem minmax(0,1fr) 7rem 8.5rem 3.8rem" };
   const eta = (n) => {
     const d = (prio || []).find((x) => x.num === n);
     return d ? fmtCountdown(d.remainingMs) : "";
@@ -865,6 +866,8 @@ function AroundWindow({ data, prio, myPos, onClose }) {
     <div key={key + r.num} className="grid items-center gap-2 px-2 py-0.5 text-white font-sans border-b border-white/10" style={{ ...cols, fontSize: 12 }}>
       <span className="text-white/60">P{r.pos}</span>
       <span className="font-black">#{r.num}</span>
+      {hasCls && <span className="truncate text-white/80">{r.cat}</span>}
+      {hasCls && <span className="font-mono tabular-nums font-black">{r.pic != null ? `${r.pic}e` : ""}</span>}
       <span className="truncate">{r.team}</span>
       <span className="font-mono tabular-nums font-black text-right">
         {fmtGapMs(Math.abs(r.gapMs))} <span className="text-white/50 font-sans font-normal">{r.point}</span>
@@ -884,12 +887,12 @@ function AroundWindow({ data, prio, myPos, onClose }) {
             Écart mesuré au dernier point (S1, S2 ou ligne) franchi par la voiture et par nous. Estimation = compte à rebours avant le dépassement quand il est prévu.
           </div>
           <div className="grid gap-2 px-2 pb-0.5 text-white/50 font-sans font-black uppercase" style={{ ...cols, fontSize: 10 }}>
-            <span>Pos</span><span>N°</span><span>Équipe</span><span className="text-right">Écart</span><span>Tendance</span><span className="text-right">Estim.</span>
+            <span>Pos</span><span>N°</span>{hasCls && <span>Classe</span>}{hasCls && <span>PIC</span>}<span>Équipe</span><span className="text-right">Écart</span><span>Tendance</span><span className="text-right">Estim.</span>
           </div>
           {band(`↗ Devant nous (${data.ahead.length})`, "bg-white/10 text-white")}
           {data.ahead.length === 0 && <div className="px-2 py-1 text-white/50 text-xs">Aucune voiture devant sur ce tour</div>}
           {data.ahead.map((r) => row(r, "a"))}
-          {band(`NOUS · P${myPos ?? "?"}`, "bg-yellow-400 text-black")}
+          {band(`NOUS · P${myPos ?? "?"}${data.me && data.me.cat ? ` · ${data.me.cat} · ${data.me.pic}e de la classe` : ""}`, "bg-yellow-400 text-black")}
           {band(`↘ Derrière nous (${data.behind.length})`, "bg-white/10 text-white")}
           {data.behind.length === 0 && <div className="px-2 py-1 text-white/50 text-xs">Aucune voiture derrière sur ce tour</div>}
           {data.behind.map((r) => row(r, "b"))}

@@ -406,9 +406,22 @@ function lastCommonPoint(myPts, a, xPts, myLap) {
   return null;
 }
 
+// position dans la classe (PIC) de chaque voiture, calculée depuis le classement général : { num: { cat, pic } }
+export function classPositions(cars) {
+  const by = {};
+  for (const n of Object.keys(cars || {})) {
+    const c = cars[n];
+    if (!c || !c.pos) continue;
+    (by[c.cat || ""] = by[c.cat || ""] || []).push(n);
+  }
+  const out = {};
+  for (const k of Object.keys(by)) by[k].sort((a, b) => cars[a].pos - cars[b].pos).forEach((n, i) => (out[n] = { cat: k, pic: i + 1 }));
+  return out;
+}
+
 // Les voitures autour de nous SUR LA PISTE, avec l'écart mesuré au dernier point commun (S1, S2 ou ligne).
-// renvoie { ahead: [...], behind: [...] } : ahead = jusqu'à nAhead voitures devant (la plus éloignée d'abord), behind = jusqu'à nBehind derrière (la plus proche d'abord).
-// ligne : { num, team, pos, gapMs (> 0 : derrière nous), point ("S1" | "S2" | "Ligne"), trendMs (variation de |écart| depuis le point précédent : < 0 = se rapproche, null si inconnu) }
+// renvoie { ahead: [...], behind: [...], me: { cat, pic } } : ahead = jusqu'à nAhead voitures devant (la plus éloignée d'abord), behind = jusqu'à nBehind derrière (la plus proche d'abord).
+// ligne : { num, team, pos, cat (classe), pic (position dans la classe), gapMs (> 0 : derrière nous), point ("S1" | "S2" | "Ligne"), trendMs (variation de |écart| depuis le point précédent : < 0 = se rapproche, null si inconnu) }
 export function aroundOnTrack(cars, myNum, nowMs, store = paceStore, hist = lapStore, nAhead = 25, nBehind = 15) {
   const me = cars && cars[myNum];
   if (!me || me.lapEnd == null || OFF_TRACK.test(me.state || "")) return null;
@@ -418,6 +431,7 @@ export function aroundOnTrack(cars, myNum, nowMs, store = paceStore, hist = lapS
   const myPts = pointTimeline(myNum, me, nowMs, mySec, hist);
   const a = myPts.length - 1;
   if (a < 1 || myPts[a].bad || isOverdue(myPts[a], mySec, nowMs)) return null;
+  const cls = classPositions(cars);
   const rows = [];
   for (const num of Object.keys(cars)) {
     if (num === myNum) continue;
@@ -441,11 +455,11 @@ export function aroundOnTrack(cars, myNum, nowMs, store = paceStore, hist = lapS
       if (Math.sign(gp) === Math.sign(g0)) trendMs = Math.abs(g0) - Math.abs(gp);
       break;
     }
-    rows.push({ num, team: c.team, pos: c.pos, gapMs: g0, point: ["S1", "S2", "Ligne"][myPts[cp.ai].k], trendMs });
+    rows.push({ num, team: c.team, pos: c.pos, cat: (cls[num] || {}).cat || "", pic: (cls[num] || {}).pic ?? null, gapMs: g0, point: ["S1", "S2", "Ligne"][myPts[cp.ai].k], trendMs });
   }
   const ahead = rows.filter((r) => r.gapMs < 0).sort((x, y) => Math.abs(x.gapMs) - Math.abs(y.gapMs)).slice(0, nAhead).reverse();
   const behind = rows.filter((r) => r.gapMs > 0).sort((x, y) => x.gapMs - y.gapMs).slice(0, nBehind);
-  return { ahead, behind };
+  return { ahead, behind, me: cls[myNum] || null };
 }
 
 function duelEstimatesPoints(cars, myNum, remainingMs, store, nowMs, hist = lapStore) {
