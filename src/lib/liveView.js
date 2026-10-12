@@ -195,7 +195,7 @@ export function linePhase(c, ref) {
   return T;
 }
 
-const OFF_TRACK = /FUEL|PIT|STOP|OUT|GARAGE|BOX|STAND|ENTR|PARK/i; // voiture au stand (ou qui y entre / en sort) : pas une voiture "de piste"
+const OFF_TRACK = /FUEL|PIT|STOP|OUT|GARAGE|BOX|STAND|ENTR|PARK|(^|[^A-Za-z])IN([^A-Za-z]|$)/i; // voiture au stand (ou qui y entre / en sort) : pas une voiture "de piste"
 
 // médiane des derniers tours de toutes les voitures : sert à repérer un tour de stand (très long par rapport aux autres),
 // sans éliminer tout le monde pendant une neutralisation où tous roulent lentement
@@ -229,9 +229,100 @@ export function onTrackNeighbors(cars, myNum, myPace, windowMs = 90000) {
   return seen ? out : null;
 }
 
+// Position estimée de chaque voiture SUR LA PISTE à l'instant nowMs (en tours, partie fractionnaire = avancement dans le tour).
+// On repart du dernier passage de la ligne (lap_end, exact) et on fait avancer la voiture avec les temps d'intermédiaires de son tour en cours
+// (ou, à défaut, avec son rythme habituel), en répartissant le tour comme le fait notre meilleur tour (S1 / S2 / S3).
+// Contrairement à linePhase (photo figée à chaque intermédiaire), cette position continue d'avancer seconde après seconde,
+// ce qui permet de voir une voiture se rapprocher entre deux intermédiaires.
+export function trackProgress(num, c, ref, nowMs, store = paceStore) {
+  if (!c || c.lapEnd == null || c.laps == null || !ref || ref.s1b == null || ref.s2b == null || ref.s3b == null) return null;
+  const tot = ref.s1b + ref.s2b + ref.s3b;
+  const pace = paceOf(num, c, store) || tot;
+  const k = pace / tot; // échelle de cette voiture par rapport à notre meilleur tour
+  const e = Math.max(0, nowMs - c.lapEnd);
+  if (e > pace * 1.4) return null; // plus de nouvelle donnée depuis très longtemps : voiture probablement arrêtée / aux stands
+  const ok = (v, b) => v != null && v >= 0.6 * b * k && v <= 1.6 * b * k;
+  const a1 = ok(c.s1, ref.s1b) ? c.s1 : ref.s1b * k;
+  const a2 = ok(c.s2, ref.s2b) ? c.s2 : ref.s2b * k;
+  const a3 = ok(c.s3, ref.s3b) ? c.s3 : ref.s3b * k;
+  const F1 = ref.s1b / tot;
+  const F2 = (ref.s1b + ref.s2b) / tot;
+  let fr;
+  if (e < a1) fr = (e / a1) * F1;
+  else if (e < a1 + a2) fr = F1 + ((e - a1) / a2) * (F2 - F1);
+  else fr = F2 + Math.min(1, (e - a1 - a2) / a3) * (1 - F2);
+  return c.laps + fr;
+}
+
+// mémoire de l'écart (ms) avec chaque voiture proche, pour mesurer à quelle vitesse il se réduit réellement
+const gapStore = {};
+function observedClosingRate(num, nowMs, d, store = gapStore) {
+  const h = store[num] || (store[num] = []);
+  if (h.length && Math.sign(h[h.length - 1].d) !== Math.sign(d)) h.length = 0; // dépassement : on repart de zéro
+  if (!h.length || nowMs - h[h.length - 1].t >= 2500) h.push({ t: nowMs, d });
+  while (h.length && nowMs - h[0].t > 150000) h.shift();
+  if (h.length < 4 || h[h.length - 1].t - h[0].t < 25000) return null;
+  const n = h.length;
+  let st = 0, sd = 0, stt = 0, std = 0;
+  for (const p of h) {
+    st += p.t - h[0].t;
+    sd += p.d;
+    stt += (p.t - h[0].t) * (p.t - h[0].t);
+    std += (p.t - h[0].t) * p.d;
+  }
+  const den = n * stt - st * st;
+  if (Math.abs(den) < 1e-6) return null;
+  const slope = (n * std - st * sd) / den; // variation de d (ms) par ms
+  return -Math.sign(d) * slope; // > 0 : l'écart diminue
+}
+
+// Estimation des contacts avec TOUTES les voitures proches sur la piste, positions continues (nowMs requis).
+function duelEstimatesTrackLive(cars, myNum, remainingMs, store, windowMs, nowMs) {
+  const me = cars && cars[myNum];
+  if (!me) return null;
+  const myPace = paceOf(myNum, me, store);
+  if (!myPace) return null;
+  if (OFF_TRACK.test(me.state || "")) return { threats: [], chases: [], onTrack: true }; // nous sommes aux stands
+  const myProg = trackProgress(myNum, me, me, nowMs, store);
+  if (myProg == null) return null;
+  const threats = [];
+  const chases = [];
+  let seen = 0;
+  for (const num of Object.keys(cars)) {
+    if (num === myNum) continue;
+    const c = cars[num];
+    if (!c || OFF_TRACK.test(c.state || "")) continue;
+    const p = paceOf(num, c, store);
+    if (!p) continue;
+    if (c.last != null && c.last > p * 1.6) continue; // vient de rouler un tour extrêmement lent (arrêt prolongé, incident) : position peu fiable
+    const pr = trackProgress(num, c, me, nowMs, store);
+    if (pr == null) continue;
+    seen++;
+    let dd = pr - myProg;
+    dd -= Math.round(dd);
+    const d = -dd * myPace; // > 0 : derrière nous sur la piste ; < 0 : devant nous
+    if (Math.abs(d) > windowMs) {
+      delete gapStore[num];
+      continue;
+    }
+    const gap = Math.abs(d);
+    const ratePace = (d > 0 ? myPace - p : p - myPace) / myPace;
+    const rateObs = observedClosingRate(num, nowMs, d);
+    // on croit le rythme moyen, sauf si l'écart mesuré se réduit nettement moins vite que prévu
+    const rate = rateObs != null ? (rateObs < 0.5 * ratePace ? rateObs : ratePace) : ratePace;
+    const row = { num, team: c.team, pos: c.pos };
+    const t = buildDuel(row, gap, rate * myPace, myPace, remainingMs);
+    if (!t) continue;
+    if (d > 0) threats.push(t);
+    else chases.push(t);
+  }
+  return seen ? { threats, chases, onTrack: true } : null;
+}
+
 // Estimation des contacts avec TOUTES les voitures proches sur la piste (devant et derrière), du plus rapide à venir au plus lent.
 // renvoie { threats, chases, onTrack: true } ou null si le flux ne contient pas les heures de passage (-> repli classement)
-export function duelEstimatesTrack(cars, myNum, remainingMs, store = paceStore, windowMs = 90000) {
+export function duelEstimatesTrack(cars, myNum, remainingMs, store = paceStore, windowMs = 90000, nowMs = null) {
+  if (nowMs != null) return duelEstimatesTrackLive(cars, myNum, remainingMs, store, windowMs, nowMs);
   const me = cars && cars[myNum];
   if (!me) return null;
   const myPace = paceOf(myNum, me, store);

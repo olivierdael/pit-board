@@ -851,7 +851,7 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", 
   updatePace(info.cars);
   const remMs = clock && clock.remainingSec != null ? clock.remainingSec * 1000 : null;
   // priorité : toutes les voitures proches SUR LA PISTE (heures de passage du flux) ; repli : voisins du classement
-  const duel = duelEstimatesTrack(info.cars, num, remMs) || duelEstimates(nb || neighborsOf(info.cars, num, 3), remMs);
+  const duel = duelEstimatesTrack(info.cars, num, remMs, undefined, undefined, now) || duelEstimates(nb || neighborsOf(info.cars, num, 3), remMs);
   const prio = duel && duel.onTrack ? prioritizedDuels(duel, now) : [];
   const trackRows = trackAlertRows(prio, live.pos);
   const zones = classDuels(neighborsOf(info.cars, num, 6), remMs, now);
