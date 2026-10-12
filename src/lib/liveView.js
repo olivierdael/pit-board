@@ -420,7 +420,7 @@ export function classPositions(cars) {
 }
 
 // Les voitures autour de nous SUR LA PISTE, avec l'écart mesuré au dernier point commun (S1, S2 ou ligne).
-// renvoie { ahead: [...], behind: [...], me: { cat, pic } } : ahead = jusqu'à nAhead voitures devant (la plus éloignée d'abord), behind = jusqu'à nBehind derrière (la plus proche d'abord).
+// renvoie { ahead: [...], behind: [...], me: { cat, pic }, ref: { point, at } (notre dernier point de chronométrage et son heure) } : ahead = jusqu'à nAhead voitures devant (la plus éloignée d'abord), behind = jusqu'à nBehind derrière (la plus proche d'abord).
 // ligne : { num, team, pos, cat (classe), pic (position dans la classe), gapMs (> 0 : derrière nous), point ("S1" | "S2" | "Ligne"), trendMs (variation de |écart| depuis le point précédent : < 0 = se rapproche, null si inconnu) }
 export function aroundOnTrack(cars, myNum, nowMs, store = paceStore, hist = lapStore, nAhead = 25, nBehind = 15) {
   const me = cars && cars[myNum];
@@ -430,7 +430,7 @@ export function aroundOnTrack(cars, myNum, nowMs, store = paceStore, hist = lapS
   const myLap = mySec[0] + mySec[1] + mySec[2];
   const myPts = pointTimeline(myNum, me, nowMs, mySec, hist);
   const a = myPts.length - 1;
-  if (a < 1 || myPts[a].bad || isOverdue(myPts[a], mySec, nowMs)) return null;
+  if (a < 1) return null; // les écarts déjà mesurés restent exacts même si nous sommes un peu en retard sur notre prochain point
   const cls = classPositions(cars);
   const rows = [];
   for (const num of Object.keys(cars)) {
@@ -459,7 +459,7 @@ export function aroundOnTrack(cars, myNum, nowMs, store = paceStore, hist = lapS
   }
   const ahead = rows.filter((r) => r.gapMs < 0).sort((x, y) => Math.abs(x.gapMs) - Math.abs(y.gapMs)).slice(0, nAhead).reverse();
   const behind = rows.filter((r) => r.gapMs > 0).sort((x, y) => x.gapMs - y.gapMs).slice(0, nBehind);
-  return { ahead, behind, me: cls[myNum] || null };
+  return { ahead, behind, me: cls[myNum] || null, ref: { point: ["S1", "S2", "Ligne"][myPts[a].k], at: myPts[a].t } };
 }
 
 function duelEstimatesPoints(cars, myNum, remainingMs, store, nowMs, hist = lapStore) {

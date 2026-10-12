@@ -848,8 +848,8 @@ function FitLine({ children, max = 16, min = 8, className = "", style }) {
   );
 }
 
-// Fenêtre « autour de nous » : les voitures devant et derrière nous SUR LA PISTE, avec l'écart exact mesuré au dernier point commun
-function AroundWindow({ data, prio, myPos, onClose }) {
+// Contenu du tableau « autour de nous » : les voitures devant et derrière nous SUR LA PISTE, avec l'écart exact mesuré au dernier point commun
+function AroundTable({ data, prio, myPos, now, stale, nA, nB, setNA, setNB }) {
   const hasCls = !!data && [...data.ahead, ...data.behind].some((r) => r.cat);
   const cols = { gridTemplateColumns: hasCls ? "2.4rem 3.2rem 4.6rem 2.6rem minmax(0,1fr) 7rem 8.5rem 3.8rem" : "2.4rem 3.2rem minmax(0,1fr) 7rem 8.5rem 3.8rem" };
   const eta = (n) => {
@@ -877,28 +877,186 @@ function AroundWindow({ data, prio, myPos, onClose }) {
     </div>
   );
   const band = (txt, extra) => <div className={`px-2 py-0.5 font-black uppercase tracking-wide text-xs ${extra}`}>{txt}</div>;
+  if (!data) return <div className="text-white/70 font-sans text-sm p-2">Pas encore assez de données (il faut quelques tours de notre voiture).</div>;
+  const ref = data.ref;
+  const refAge = ref ? Math.max(0, Math.round((now - ref.at) / 1000)) : null;
   return (
-    <PanelHost modal open onClose={onClose} title="Autour de nous sur la piste">
-      {!data ? (
-        <div className="text-white/70 font-sans text-sm p-2">Pas encore assez de données (il faut quelques tours), ou notre voiture est aux stands.</div>
-      ) : (
-        <div>
-          <div className="text-white/60 font-sans text-xs px-2 pb-1">
-            Écart mesuré au dernier point (S1, S2 ou ligne) franchi par la voiture et par nous. Estimation = compte à rebours avant le dépassement quand il est prévu.
-          </div>
-          <div className="grid gap-2 px-2 pb-0.5 text-white/50 font-sans font-black uppercase" style={{ ...cols, fontSize: 10 }}>
-            <span>Pos</span><span>N°</span>{hasCls && <span>Classe</span>}{hasCls && <span>PIC</span>}<span>Équipe</span><span className="text-right">Écart</span><span>Tendance</span><span className="text-right">Estim.</span>
-          </div>
-          {band(`↗ Devant nous (${data.ahead.length})`, "bg-white/10 text-white")}
-          {data.ahead.length === 0 && <div className="px-2 py-1 text-white/50 text-xs">Aucune voiture devant sur ce tour</div>}
-          {data.ahead.map((r) => row(r, "a"))}
-          {band(`NOUS · P${myPos ?? "?"}${data.me && data.me.cat ? ` · ${data.me.cat} · ${data.me.pic}e de la classe` : ""}`, "bg-yellow-400 text-black")}
-          {band(`↘ Derrière nous (${data.behind.length})`, "bg-white/10 text-white")}
-          {data.behind.length === 0 && <div className="px-2 py-1 text-white/50 text-xs">Aucune voiture derrière sur ce tour</div>}
-          {data.behind.map((r) => row(r, "b"))}
+    <div>
+      {ref && (
+        <div className="rounded border border-yellow-400/70 bg-black/50 px-2 py-1 mb-1 text-white font-sans text-xs">
+          <span className="font-black uppercase text-yellow-300">Chrono pris {ref.point === "Ligne" ? "à la ligne" : `au ${ref.point}`}</span>
+          {" · "}notre passage à <b className="font-mono">{new Date(ref.at).toLocaleTimeString("fr-BE")}</b>
+          <span className="text-white/60"> (il y a {refAge} s)</span>
         </div>
       )}
-    </PanelHost>
+      {stale > 0 && (
+        <div className="rounded bg-orange-500/20 border border-orange-400/60 px-2 py-1 mb-1 text-orange-200 font-sans text-xs">
+          ⚠ Données figées depuis {stale} s (notre voiture est aux stands ou le flux est interrompu) : le tableau reprend dès le prochain point.
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-3 px-2 pb-1 text-white font-sans text-xs">
+        {[["Devant", nA, setNA], ["Derrière", nB, setNB]].map(([lbl, v, set]) => (
+          <label key={lbl} className="flex items-center gap-1">
+            <span className="font-black uppercase">{lbl}</span>
+            <select value={v} onChange={(e) => set(Number(e.target.value))} className="rounded bg-black/60 border border-white/30 px-1 py-0.5 text-white">
+              {[3, 5, 10, 15, 25, 40, 60].map((n) => (
+                <option key={n} value={n}>{n} voitures</option>
+              ))}
+            </select>
+          </label>
+        ))}
+      </div>
+      <div className="text-white/60 font-sans text-xs px-2 pb-1">
+        Écart mesuré au dernier point (S1, S2 ou ligne) franchi par la voiture et par nous. Estimation = compte à rebours avant le dépassement quand il est prévu.
+      </div>
+      <div className="grid gap-2 px-2 pb-0.5 text-white/50 font-sans font-black uppercase" style={{ ...cols, fontSize: 10 }}>
+        <span>Pos</span><span>N°</span>{hasCls && <span>Classe</span>}{hasCls && <span>PIC</span>}<span>Équipe</span><span className="text-right">Écart</span><span>Tendance</span><span className="text-right">Estim.</span>
+      </div>
+      {band(`↗ Devant nous (${data.ahead.length})`, "bg-white/10 text-white")}
+      {data.ahead.length === 0 && <div className="px-2 py-1 text-white/50 text-xs">Aucune voiture devant sur ce tour</div>}
+      {data.ahead.map((r) => row(r, "a"))}
+      {band(`NOUS · P${myPos ?? "?"}${data.me && data.me.cat ? ` · ${data.me.cat} · ${data.me.pic}e de la classe` : ""}`, "bg-yellow-400 text-black")}
+      {band(`↘ Derrière nous (${data.behind.length})`, "bg-white/10 text-white")}
+      {data.behind.length === 0 && <div className="px-2 py-1 text-white/50 text-xs">Aucune voiture derrière sur ce tour</div>}
+      {data.behind.map((r) => row(r, "b"))}
+    </div>
+  );
+}
+
+// Fenêtre flottante, déplaçable à la souris (barre de titre) ou avec ◀ ▶ : la vidéo reste visible et utilisable derrière
+function FloatingPanel({ title, onClose, onPopout, children }) {
+  const KEY = "pitboard_around_pos";
+  const box = useRef(null);
+  const drag = useRef(null);
+  const [pos, setPos] = useState(() => {
+    try {
+      const v = JSON.parse(localStorage.getItem(KEY) || "null");
+      if (v && Number.isFinite(v.x) && Number.isFinite(v.y)) return v;
+    } catch {
+      /* stockage indisponible */
+    }
+    return { x: 16, y: 72 };
+  });
+  const save = (p) => {
+    try {
+      localStorage.setItem(KEY, JSON.stringify(p));
+    } catch {
+      /* stockage indisponible */
+    }
+  };
+  const clamp = (p) => ({ x: Math.min(Math.max(0, p.x), Math.max(0, window.innerWidth - 140)), y: Math.min(Math.max(0, p.y), Math.max(0, window.innerHeight - 40)) });
+  const snap = (side) => {
+    const w = box.current ? box.current.offsetWidth : 720;
+    const p = clamp({ x: side === "left" ? 8 : window.innerWidth - w - 8, y: pos.y });
+    setPos(p);
+    save(p);
+  };
+  const onDown = (e) => {
+    if (e.target.closest("button")) return;
+    drag.current = { dx: e.clientX - pos.x, dy: e.clientY - pos.y };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const onMove = (e) => {
+    if (drag.current) setPos(clamp({ x: e.clientX - drag.current.dx, y: e.clientY - drag.current.dy }));
+  };
+  const onUp = () => {
+    if (drag.current) save(pos);
+    drag.current = null;
+  };
+  const btn = "rounded border border-white/30 bg-black/40 hover:bg-black/70 px-2 py-0.5 text-white text-xs font-black";
+  return (
+    <div
+      ref={box}
+      className="fixed z-50 flex flex-col rounded-xl border border-white/30 bg-neutral-900/95 shadow-2xl"
+      style={{ left: pos.x, top: pos.y, width: "min(720px, calc(100vw - 16px))", maxHeight: "calc(100vh - 16px)" }}
+    >
+      <div
+        className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-white/10 cursor-move select-none touch-none"
+        onPointerDown={onDown}
+        onPointerMove={onMove}
+        onPointerUp={onUp}
+        onPointerCancel={onUp}
+      >
+        <span className="text-white font-black uppercase tracking-wide text-sm">{title}</span>
+        <span className="flex items-center gap-1">
+          <button type="button" className={btn} onClick={() => snap("left")} title="Placer à gauche">◀</button>
+          <button type="button" className={btn} onClick={() => snap("right")} title="Placer à droite">▶</button>
+          <button type="button" className={btn} onClick={onPopout} title="Ouvrir dans une autre fenêtre du navigateur">↗ Fenêtre séparée</button>
+          <button type="button" className={btn} onClick={onClose} title="Fermer">✕</button>
+        </span>
+      </div>
+      <div className="overflow-y-auto p-2">{children}</div>
+    </div>
+  );
+}
+
+// « Autour de nous » : fenêtre flottante déplaçable, ou fenêtre séparée du navigateur (par exemple sur un autre écran)
+function AroundWindow({ compute, prio, myPos, now, onClose }) {
+  const getN = (k, d) => {
+    try {
+      const v = Number(localStorage.getItem(k));
+      return v > 0 ? v : d;
+    } catch {
+      return d;
+    }
+  };
+  const [nA, setNAraw] = useState(() => getN("pitboard_around_ahead", 25));
+  const [nB, setNBraw] = useState(() => getN("pitboard_around_behind", 15));
+  const setN = (k, set) => (v) => {
+    set(v);
+    try {
+      localStorage.setItem(k, String(v));
+    } catch {
+      /* stockage indisponible */
+    }
+  };
+  const setNA = setN("pitboard_around_ahead", setNAraw);
+  const setNB = setN("pitboard_around_behind", setNBraw);
+  const data = compute(nA, nB);
+  const last = useRef(null);
+  if (data) last.current = { data, at: now };
+  const shown = data || (last.current && last.current.data) || null; // on garde le dernier tableau valide si le calcul est momentanément impossible
+  const stale = !data && last.current ? Math.round((now - last.current.at) / 1000) : 0;
+  const [popup, setPopup] = useState(null); // { w, root } quand la fenêtre séparée est ouverte
+  const [msg, setMsg] = useState("");
+  useEffect(() => {
+    if (!popup) return undefined;
+    const id = setInterval(() => {
+      if (popup.w.closed) setPopup(null);
+    }, 800);
+    return () => {
+      clearInterval(id);
+      try {
+        if (!popup.w.closed) popup.w.close();
+      } catch {
+        /* déjà fermée */
+      }
+    };
+  }, [popup]);
+  const openPopup = () => {
+    const w = window.open("", "pitboard_autour", "popup=yes,width=660,height=880,left=40,top=40");
+    if (!w) {
+      setMsg("La fenêtre séparée a été bloquée par le navigateur : autorisez les pop-ups pour ce site, puis réessayez.");
+      return;
+    }
+    setMsg("");
+    w.document.title = "PitBoard · Autour de nous";
+    w.document.head.innerHTML = '<meta charset="utf-8">';
+    document.querySelectorAll('link[rel="stylesheet"], style').forEach((n) => w.document.head.appendChild(n.cloneNode(true)));
+    w.document.body.innerHTML = "";
+    w.document.body.className = "bg-neutral-900";
+    w.document.body.style.margin = "0";
+    const root = w.document.createElement("div");
+    w.document.body.appendChild(root);
+    setPopup({ w, root });
+  };
+  const table = <AroundTable data={shown} prio={prio} myPos={myPos} now={now} stale={stale} nA={nA} nB={nB} setNA={setNA} setNB={setNB} />;
+  if (popup) return createPortal(<div className="bg-neutral-900 p-2 min-h-screen">{table}</div>, popup.root);
+  return (
+    <FloatingPanel title="Autour de nous sur la piste" onClose={onClose} onPopout={openPopup}>
+      {msg && <div className="rounded bg-red-500/20 border border-red-400/60 px-2 py-1 mb-1 text-red-200 font-sans text-xs">{msg}</div>}
+      {table}
+    </FloatingPanel>
   );
 }
 
@@ -1153,7 +1311,7 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", 
                       </div>
                       {aroundOpen &&
                         createPortal(
-                          <AroundWindow data={aroundOnTrack(info.cars, num, now)} prio={prio} myPos={live.pos} onClose={() => setAroundOpen(false)} />,
+                          <AroundWindow compute={(na, nb) => aroundOnTrack(info.cars, num, now, undefined, undefined, na, nb)} prio={prio} myPos={live.pos} now={now} onClose={() => setAroundOpen(false)} />,
                           document.body
                         )}
                       {genRows.length === 0 && <span className="text-white/60 font-sans px-1" style={{ fontSize: fs(11) }}>Aucun équipage concerné pour le moment</span>}
