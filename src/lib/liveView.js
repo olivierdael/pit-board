@@ -9,10 +9,13 @@ export function fmtMs(ms) {
   return m > 0 ? `${m}:${sec.padStart(6, "0")}` : sec;
 }
 
-// secteur court : 35631 -> "35.6"
+// secteur court : 35631 -> "35.6" ; au-delà d'une minute : 155000 -> "2:35.0"
 export function fmtSec1(ms) {
   if (ms == null || !Number.isFinite(ms)) return "–";
-  return (ms / 1000).toFixed(1);
+  const t = Math.round(Math.max(0, ms) / 100); // dixièmes de seconde
+  const m = Math.floor(t / 600);
+  const sec = ((t % 600) / 10).toFixed(1);
+  return m > 0 ? `${m}:${sec.padStart(4, "0")}` : sec;
 }
 
 // écart : 21309 -> "21.3 s", 65200 -> "1:05.2"
