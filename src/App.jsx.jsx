@@ -632,7 +632,7 @@ function FitToScreen({ children, reserve = 150, min = 0.45 }) {
   const inner = useRef(null);
   const [fit, setFit] = useState({ s: 1, h: null });
   useLayoutEffect(() => {
-    function recompute() {
+    function recompute(force) {
       const o = outer.current;
       const i = inner.current;
       if (!o || !i) return;
@@ -647,21 +647,28 @@ function FitToScreen({ children, reserve = 150, min = 0.45 }) {
       let s = Math.max(min, Math.min(1, avail / natural));
       s = Math.floor(s * 50) / 50; // pas de 2 % : évite les oscillations
       setFit((f) => {
-        const keep = f.h !== null && Math.abs(f.s - s) < 0.019;
-        const es = keep ? f.s : s;
+        if (f.h === null) return { s, h: Math.ceil(natural * s) };
+        // Anti-tremblement : réduire est immédiat (sinon le contenu déborde), mais
+        // ré-agrandir exige un vrai gain (≥ 6 %), sauf si la fenêtre elle-même change.
+        // Sinon le changement de largeur dû à l'échelle modifie le retour à la ligne,
+        // donc la hauteur, donc l'échelle... et l'image oscille en boucle.
+        const es = force || s < f.s || s - f.s >= 0.06 ? s : f.s;
         const h = Math.ceil(natural * es);
-        return keep && Math.abs(f.h - h) < 2 ? f : { s: es, h };
+        if (es !== f.s) return { s: es, h };
+        // même échelle : la hauteur réservée ne bouge que si elle augmente ou baisse nettement
+        return h > f.h || f.h - h >= 14 ? { s: es, h } : f;
       });
     }
-    recompute();
-    window.addEventListener("resize", recompute);
+    const onResize = () => recompute(true);
+    recompute(true);
+    window.addEventListener("resize", onResize);
     let ro = null;
     if (typeof ResizeObserver !== "undefined" && inner.current) {
-      ro = new ResizeObserver(recompute);
+      ro = new ResizeObserver(() => recompute(false));
       ro.observe(inner.current);
     }
     return () => {
-      window.removeEventListener("resize", recompute);
+      window.removeEventListener("resize", onResize);
       if (ro) ro.disconnect();
     };
   }, [reserve, min]);
