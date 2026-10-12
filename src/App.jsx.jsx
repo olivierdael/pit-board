@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from "react";
+import { createPortal } from "react-dom";
 import { supabase } from "./lib/supabase";
 import { fetchLiveTiming, parseLiveTiming, normalizeCarNumber } from "./lib/risLive";
 import { RIS_ORIGIN, buildBookmarklet, readRisMessage } from "./lib/risBridge";
@@ -22,7 +23,7 @@ import {
   observeLap,
   mergeBest,
 } from "./lib/drivers";
-import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, classDuels, trackAlertRows, trackSwaps } from "./lib/liveView";
+import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, classDuels, trackAlertRows, trackSwaps, aroundOnTrack } from "./lib/liveView";
 import {
   Flag,
   Plus,
@@ -847,10 +848,62 @@ function FitLine({ children, max = 16, min = 8, className = "", style }) {
   );
 }
 
+// Fenêtre « autour de nous » : les voitures devant et derrière nous SUR LA PISTE, avec l'écart exact mesuré au dernier point commun
+function AroundWindow({ data, prio, myPos, onClose }) {
+  const cols = { gridTemplateColumns: "2.4rem 3.2rem minmax(0,1fr) 7rem 8.5rem 3.8rem" };
+  const eta = (n) => {
+    const d = (prio || []).find((x) => x.num === n);
+    return d ? fmtCountdown(d.remainingMs) : "";
+  };
+  const trend = (r) => {
+    if (r.trendMs == null) return <span className="text-white/40">–</span>;
+    if (r.trendMs < -300) return <span style={{ color: "#38bdf8" }}>↘ se rapproche {fmtGapMs(-r.trendMs)}</span>;
+    if (r.trendMs > 300) return <span className="text-white/60">↗ s'éloigne {fmtGapMs(r.trendMs)}</span>;
+    return <span className="text-white/60">= stable</span>;
+  };
+  const row = (r, key) => (
+    <div key={key + r.num} className="grid items-center gap-2 px-2 py-0.5 text-white font-sans border-b border-white/10" style={{ ...cols, fontSize: 12 }}>
+      <span className="text-white/60">P{r.pos}</span>
+      <span className="font-black">#{r.num}</span>
+      <span className="truncate">{r.team}</span>
+      <span className="font-mono tabular-nums font-black text-right">
+        {fmtGapMs(Math.abs(r.gapMs))} <span className="text-white/50 font-sans font-normal">{r.point}</span>
+      </span>
+      <span>{trend(r)}</span>
+      <span className="font-mono tabular-nums font-black text-right">{eta(r.num)}</span>
+    </div>
+  );
+  const band = (txt, extra) => <div className={`px-2 py-0.5 font-black uppercase tracking-wide text-xs ${extra}`}>{txt}</div>;
+  return (
+    <PanelHost modal open onClose={onClose} title="Autour de nous sur la piste">
+      {!data ? (
+        <div className="text-white/70 font-sans text-sm p-2">Pas encore assez de données (il faut quelques tours), ou notre voiture est aux stands.</div>
+      ) : (
+        <div>
+          <div className="text-white/60 font-sans text-xs px-2 pb-1">
+            Écart mesuré au dernier point (S1, S2 ou ligne) franchi par la voiture et par nous. Estimation = compte à rebours avant le dépassement quand il est prévu.
+          </div>
+          <div className="grid gap-2 px-2 pb-0.5 text-white/50 font-sans font-black uppercase" style={{ ...cols, fontSize: 10 }}>
+            <span>Pos</span><span>N°</span><span>Équipe</span><span className="text-right">Écart</span><span>Tendance</span><span className="text-right">Estim.</span>
+          </div>
+          {band(`↗ Devant nous (${data.ahead.length})`, "bg-white/10 text-white")}
+          {data.ahead.length === 0 && <div className="px-2 py-1 text-white/50 text-xs">Aucune voiture devant sur ce tour</div>}
+          {data.ahead.map((r) => row(r, "a"))}
+          {band(`NOUS · P${myPos ?? "?"}`, "bg-yellow-400 text-black")}
+          {band(`↘ Derrière nous (${data.behind.length})`, "bg-white/10 text-white")}
+          {data.behind.length === 0 && <div className="px-2 py-1 text-white/50 text-xs">Aucune voiture derrière sur ce tour</div>}
+          {data.behind.map((r) => row(r, "b"))}
+        </div>
+      )}
+    </PanelHost>
+  );
+}
+
 // bloc "live" d'une tuile : temps de course, tour, intermédiaires, puis (si showTable) le classement
 // avec les 3 voitures devant et les 3 derrière, leurs intermédiaires et leur écart avec nous
 function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", big = false }) {
   const [genOpen, setGenOpen] = useState(false); // menu déroulant du classement général (au-delà de 5 voitures)
+  const [aroundOpen, setAroundOpen] = useState(false); // fenêtre « autour de nous sur la piste »
   if (!live) return null;
   const clock = clockNow(info, now);
   const nb = showTable && part !== "main" && part !== "alerts" ? neighborsOf(info.cars, num, 3) : null;
@@ -1081,9 +1134,25 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", 
                   const rest = genRows.slice(5);
                   return (
                     <div className="rounded-lg p-1.5 flex flex-col gap-0.5 bg-black/40 border border-white/25">
-                      <span className="font-black uppercase tracking-wide font-sans text-white/80" style={{ fontSize: fs(12) }}>
-                        🏆 Général · dépassement estimé
-                      </span>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-black uppercase tracking-wide font-sans text-white/80" style={{ fontSize: fs(12) }}>
+                          🏆 Général · dépassement estimé
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setAroundOpen(true)}
+                          className="rounded border border-white/40 bg-black/40 hover:bg-black/60 px-2 py-0.5 text-white font-black uppercase tracking-wide whitespace-nowrap"
+                          style={{ fontSize: fs(10) }}
+                          title="Voitures devant et derrière nous sur la piste, avec l'écart mesuré aux intermédiaires"
+                        >
+                          ☰ Autour de nous
+                        </button>
+                      </div>
+                      {aroundOpen &&
+                        createPortal(
+                          <AroundWindow data={aroundOnTrack(info.cars, num, now)} prio={prio} myPos={live.pos} onClose={() => setAroundOpen(false)} />,
+                          document.body
+                        )}
                       {genRows.length === 0 && <span className="text-white/60 font-sans px-1" style={{ fontSize: fs(11) }}>Aucun équipage concerné pour le moment</span>}
                       {shown.map(zRow)}
                       {rest.length > 0 && (

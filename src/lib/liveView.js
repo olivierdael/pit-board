@@ -396,6 +396,58 @@ function nearestSame(pts, k, t, maxDiff) {
   return best;
 }
 
+// dernier point de chronométrage franchi à la fois par nous (myPts, dernier index a) et par X : { ai, bi } ou null
+function lastCommonPoint(myPts, a, xPts, myLap) {
+  for (let j = 0; j < 3 && a - j >= 0; j++) {
+    const q = myPts[a - j];
+    const xi = nearestSame(xPts, q.k, q.t, 0.45 * myLap);
+    if (xi >= 0 && !q.bad && !xPts[xi].bad) return { ai: a - j, bi: xi };
+  }
+  return null;
+}
+
+// Les voitures autour de nous SUR LA PISTE, avec l'écart mesuré au dernier point commun (S1, S2 ou ligne).
+// renvoie { ahead: [...], behind: [...] } : ahead = jusqu'à nAhead voitures devant (la plus éloignée d'abord), behind = jusqu'à nBehind derrière (la plus proche d'abord).
+// ligne : { num, team, pos, gapMs (> 0 : derrière nous), point ("S1" | "S2" | "Ligne"), trendMs (variation de |écart| depuis le point précédent : < 0 = se rapproche, null si inconnu) }
+export function aroundOnTrack(cars, myNum, nowMs, store = paceStore, hist = lapStore, nAhead = 25, nBehind = 15) {
+  const me = cars && cars[myNum];
+  if (!me || me.lapEnd == null || OFF_TRACK.test(me.state || "")) return null;
+  const mySec = expectedSectors(myNum, me, me, store, hist);
+  if (!mySec) return null;
+  const myLap = mySec[0] + mySec[1] + mySec[2];
+  const myPts = pointTimeline(myNum, me, nowMs, mySec, hist);
+  const a = myPts.length - 1;
+  if (a < 1 || myPts[a].bad || isOverdue(myPts[a], mySec, nowMs)) return null;
+  const rows = [];
+  for (const num of Object.keys(cars)) {
+    if (num === myNum) continue;
+    const c = cars[num];
+    if (!c || c.lapEnd == null || OFF_TRACK.test(c.state || "")) continue;
+    const xSec = expectedSectors(num, c, me, store, hist);
+    if (!xSec) continue;
+    const xPts = pointTimeline(num, c, nowMs, xSec, hist);
+    const b = xPts.length - 1;
+    if (b < 0 || xPts[b].bad) continue;
+    if (nowMs - xPts[b].t > 1.5 * (xSec[0] + xSec[1] + xSec[2]) || isOverdue(xPts[b], xSec, nowMs)) continue;
+    const cp = lastCommonPoint(myPts, a, xPts, myLap);
+    if (!cp) continue;
+    const g0 = xPts[cp.bi].t - myPts[cp.ai].t;
+    if (g0 === 0) continue;
+    let trendMs = null;
+    for (let j = cp.ai - 1; j >= 0 && j >= cp.ai - 2; j--) {
+      const xi = nearestSame(xPts, myPts[j].k, myPts[j].t, 0.45 * myLap);
+      if (xi < 0 || myPts[j].bad || xPts[xi].bad) continue;
+      const gp = xPts[xi].t - myPts[j].t;
+      if (Math.sign(gp) === Math.sign(g0)) trendMs = Math.abs(g0) - Math.abs(gp);
+      break;
+    }
+    rows.push({ num, team: c.team, pos: c.pos, gapMs: g0, point: ["S1", "S2", "Ligne"][myPts[cp.ai].k], trendMs });
+  }
+  const ahead = rows.filter((r) => r.gapMs < 0).sort((x, y) => Math.abs(x.gapMs) - Math.abs(y.gapMs)).slice(0, nAhead).reverse();
+  const behind = rows.filter((r) => r.gapMs > 0).sort((x, y) => x.gapMs - y.gapMs).slice(0, nBehind);
+  return { ahead, behind };
+}
+
 function duelEstimatesPoints(cars, myNum, remainingMs, store, nowMs, hist = lapStore) {
   const me = cars && cars[myNum];
   if (!me || me.lapEnd == null) return null;
@@ -422,18 +474,9 @@ function duelEstimatesPoints(cars, myNum, remainingMs, store, nowMs, hist = lapS
     if (nowMs - xPts[b].t > 1.5 * (xSec[0] + xSec[1] + xSec[2])) continue; // plus de nouvelle donnée : voiture arrêtée
     if (isOverdue(xPts[b], xSec, nowMs)) continue; // en retard sur son prochain point : probablement ralentie ou aux stands
     // dernier point commun (en partant de notre point le plus récent)
-    let ai = -1;
-    let bi = -1;
-    for (let j = 0; j < 3 && a - j >= 0; j++) {
-      const q = myPts[a - j];
-      const xi = nearestSame(xPts, q.k, q.t, 0.45 * myLap);
-      if (xi >= 0 && !q.bad && !xPts[xi].bad) {
-        ai = a - j;
-        bi = xi;
-        break;
-      }
-    }
-    if (ai < 0) continue;
+    const cp = lastCommonPoint(myPts, a, xPts, myLap);
+    if (!cp) continue;
+    const { ai, bi } = cp;
     const g0 = xPts[bi].t - myPts[ai].t; // > 0 : X est derrière nous
     if (g0 === 0 || Math.abs(g0) > 120000) continue;
     const sg = Math.sign(g0);
