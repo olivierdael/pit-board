@@ -297,7 +297,7 @@ export function classDuels(nb, remainingMs, nowMs, store = paceStore, anchors = 
     if (diffMs < 50) return { ...base, kind: "away", gapMs: r.gap.ms, diffMs };
     const laps = r.gap.ms / diffMs;
     const etaMs = laps * myPace;
-    if (laps > 60 || (remainingMs != null && etaMs > remainingMs)) return { ...base, kind: "away", gapMs: r.gap.ms, diffMs, farOff: true };
+    if (laps > 500 || (remainingMs != null && etaMs > remainingMs)) return { ...base, kind: "away", gapMs: r.gap.ms, diffMs, farOff: true };
     const etaAt = anchorEta("z" + dir + r.num, Math.round(r.gap.ms) + "|" + Math.round(diffMs / 10), etaMs, nowMs, anchors);
     return {
       ...base,
@@ -314,4 +314,32 @@ export function classDuels(nb, remainingMs, nowMs, store = paceStore, anchors = 
     ahead: [...nb.above].reverse().map((r) => row(r, "ahead")), // la plus proche d'abord
     behind: nb.below.map((r) => row(r, "behind")),
   };
+}
+
+// ---------- Règles d'affichage du trafic sur la piste ----------
+// prio = prioritizedDuels(...) ; myPos = notre position au général. Renvoie uniquement les lignes à afficher, avec un "kind" :
+//   Voitures que nous allons dépasser (estimation = temps avant le dépassement, recalée à chaque split) :
+//     "slow"  : plus lente de 20 s/tour ou plus -> orange « SLOW CAR », dans les 20 s
+//     "soon"  : plus lente de 5 à 20 s/tour -> jaune, dans les 15 s
+//     "calm"  : plus lente de 0 à 5 s/tour -> vert, dans les 10 s
+//   Voitures qui vont nous dépasser, dans les 15 s :
+//     "fast"   : au moins 10 s/tour plus rapide -> bande rouge « FAST CAR »
+//     "direct" : classée derrière nous au général et moins de 2 s/tour plus rapide -> bande rouge « CONCURRENT DIRECT »
+//     "threat" : les autres -> orange, sans mention
+export function trackAlertRows(prio, myPos = null) {
+  const out = [];
+  for (const d of prio || []) {
+    let kind = null;
+    if (d.dir === "chase") {
+      if (d.closingMs >= 20000) kind = d.remainingMs <= 20000 ? "slow" : null;
+      else if (d.closingMs >= 5000) kind = d.remainingMs <= 15000 ? "soon" : null;
+      else kind = d.remainingMs <= 10000 ? "calm" : null;
+    } else if (d.remainingMs <= 15000) {
+      if (d.closingMs >= 10000) kind = "fast";
+      else if (myPos != null && d.pos != null && d.pos > myPos && d.closingMs < 2000) kind = "direct";
+      else kind = "threat";
+    }
+    if (kind) out.push({ ...d, kind });
+  }
+  return out;
 }

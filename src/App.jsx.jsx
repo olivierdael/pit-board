@@ -22,7 +22,7 @@ import {
   observeLap,
   mergeBest,
 } from "./lib/drivers";
-import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, classDuels } from "./lib/liveView";
+import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, classDuels, trackAlertRows } from "./lib/liveView";
 import {
   Flag,
   Plus,
@@ -646,7 +646,12 @@ function FitToScreen({ children, reserve = 150, min = 0.45 }) {
       const avail = window.innerHeight - top - reserve;
       let s = Math.max(min, Math.min(1, avail / natural));
       s = Math.floor(s * 50) / 50; // pas de 2 % : évite les oscillations
-      setFit((f) => (Math.abs(f.s - s) < 0.019 && f.h !== null ? f : { s, h: Math.ceil(natural * s) }));
+      setFit((f) => {
+        const keep = f.h !== null && Math.abs(f.s - s) < 0.019;
+        const es = keep ? f.s : s;
+        const h = Math.ceil(natural * es);
+        return keep && Math.abs(f.h - h) < 2 ? f : { s: es, h };
+      });
     }
     recompute();
     window.addEventListener("resize", recompute);
@@ -758,10 +763,30 @@ function DraftInput({ value, onCommit, placeholder, className, disabled }) {
   );
 }
 
+// Ligne sur une seule ligne dont la police se réduit automatiquement pour que tout le texte tienne dans la largeur
+function FitLine({ children, max = 16, min = 8, className = "", style }) {
+  const ref = useRef(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    let size = max;
+    el.style.fontSize = size + "px";
+    while (el.scrollWidth > el.clientWidth + 1 && size > min) {
+      size -= 0.5;
+      el.style.fontSize = size + "px";
+    }
+  });
+  return (
+    <div ref={ref} className={`whitespace-nowrap overflow-hidden min-w-0 ${className}`} style={style}>
+      {children}
+    </div>
+  );
+}
+
 // bloc "live" d'une tuile : temps de course, tour, intermédiaires, puis (si showTable) le classement
 // avec les 3 voitures devant et les 3 derrière, leurs intermédiaires et leur écart avec nous
 function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", big = false }) {
-  const [openZ, setOpenZ] = useState({}); // menus déroulants des alertes (devant / derrière / piste)
+  const [genOpen, setGenOpen] = useState(false); // menu déroulant du classement général (au-delà de 5 voitures)
   if (!live) return null;
   const clock = clockNow(info, now);
   const nb = showTable && part !== "main" && part !== "alerts" ? neighborsOf(info.cars, num, 3) : null;
@@ -771,89 +796,43 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", 
   // priorité : toutes les voitures proches SUR LA PISTE (heures de passage du flux) ; repli : voisins du classement
   const duel = duelEstimatesTrack(info.cars, num, remMs) || duelEstimates(nb || neighborsOf(info.cars, num, 3), remMs);
   const prio = duel && duel.onTrack ? prioritizedDuels(duel, now) : [];
-  const zones = classDuels(neighborsOf(info.cars, num, 3), remMs, now);
-  // couleurs d'une alerte : rouge/orange = elle va nous dépasser ; jaune = nous allons la dépasser
-  const alertStyle = (threat, level, remainingMs) => {
-    const hot = level === "high" || remainingMs <= 120000;
-    if (threat)
-      return { hot, bg: hot ? "#ff1f1f" : level === "mid" ? "#ff8a00" : "rgba(255,138,0,0.18)", fg: hot ? "#fff" : level === "mid" ? "#000" : "#ffb347" };
-    return { hot, bg: hot || level === "mid" ? "#ffe600" : "rgba(255,230,0,0.15)", fg: hot || level === "mid" ? "#000" : "#ffe600" };
-  };
+  const trackRows = trackAlertRows(prio, live.pos);
+  const zones = classDuels(neighborsOf(info.cars, num, 6), remMs, now);
   const K = big ? 1.3 : 1; // agrandissement des alertes quand il y a de la place
   const fs = (n) => Math.round(n * K);
-  const lapsTxt = (l) => (l < 10 ? l.toFixed(1) : String(Math.round(l)));
   const cd = (ms, size) => (
     <span className="font-mono tabular-nums font-black" style={{ fontSize: size }}>
       {ms <= 1000 ? "MAINTENANT" : fmtCountdown(ms)}
     </span>
   );
-  const zoneRow = (z) => {
-    const closing = z.kind === "closing";
-    const ahead = z.dir === "ahead";
-    const st = closing ? alertStyle(!ahead, z.level, z.remainingMs) : { hot: false, bg: "rgba(255,255,255,0.06)", fg: "rgba(255,255,255,0.75)" };
-    let detail;
-    if (z.kind === "lapped") detail = `à ${z.gapLaps} tour${z.gapLaps > 1 ? "s" : ""} : pas d'estimation`;
-    else if (z.kind === "unknown") detail = "pas assez de données";
-    else if (z.kind === "away")
-      detail = `${fmtGapMs(z.gapMs)} · ${ahead ? "s'éloigne" : "on s'éloigne"} (${(Math.abs(z.diffMs) / 1000).toFixed(1)} s/tour)${z.farOff ? " · trop lointain" : ""}`;
-    else detail = `${fmtGapMs(z.gapMs)} · ${ahead ? "+" : "gagne "}${(z.diffMs / 1000).toFixed(1)} s/tour · ~${lapsTxt(z.laps)} tr`;
-    return (
-      <div
-        key={z.dir + z.num}
-        className={`font-sans leading-tight rounded px-2 py-1 flex items-center justify-between gap-2 ${closing ? "font-black" : "font-semibold"}`}
-        style={{ backgroundColor: st.bg, color: st.fg, fontSize: fs(11) }}
-      >
-        <span>
-          {closing ? (ahead ? (st.hot ? "⚠ À DÉPASSER : " : "↗ À dépasser : ") : st.hot ? "⚠ VA NOUS DÉPASSER : " : "↘ Va nous dépasser : ") : ""}P{z.pos} #{z.num} {z.team}
-          <span className="block font-bold" style={{ fontSize: fs(10) }}>{detail}</span>
-        </span>
-        {closing && cd(z.remainingMs, 16)}
-      </div>
-    );
+  // style d'une ligne du trafic selon sa catégorie (voir trackAlertRows)
+  const trackStyle = {
+    slow: { bg: "#ff8a00", fg: "#000", blink: true, label: "🐌 !!SLOW CAR!!" },
+    soon: { bg: "#ffe600", fg: "#000", label: "" },
+    calm: { bg: "#22c55e", fg: "#000", label: "" },
+    fast: { bg: "#ff1f1f", fg: "#fff", label: "🚀 !!FAST CAR!!" },
+    direct: { bg: "#ff1f1f", fg: "#fff", label: "⚔ CONCURRENT DIRECT" },
+    threat: { bg: "#ff8a00", fg: "#000", label: "" },
   };
-  const trackRow = (d) => {
+  const trackRow = (d, large) => {
+    const st = trackStyle[d.kind];
     const threat = d.dir === "threat";
-    const st = alertStyle(threat, d.level, d.remainingMs);
     return (
       <div
         key={d.dir + d.num}
-        className="font-sans font-black leading-tight rounded px-2 py-1 flex items-center justify-between gap-2"
-        style={{ backgroundColor: st.bg, color: st.fg, fontSize: fs(11) }}
+        className={`font-sans font-black leading-tight rounded px-2 py-1 flex items-center justify-between gap-2 ${st.blink ? "animate-pulse" : ""}`}
+        style={{ backgroundColor: st.bg, color: st.fg }}
       >
-        <span>
-          {threat ? (st.hot ? "⚠ ON VA NOUS DÉPASSER : " : "↘ Va nous dépasser : ") : st.hot ? "⚠ À DÉPASSER : " : "↗ À dépasser : "}
-          {d.pos ? `P${d.pos} ` : ""}#{d.num} {d.team}
-          <span className="block font-bold" style={{ fontSize: fs(10) }}>
-            sur la piste {fmtGapMs(d.gapMs)} · {threat ? "gagne " : "+"}
-            {(d.closingMs / 1000).toFixed(1)} s/tour · ~{lapsTxt(d.laps)} tr
-          </span>
-        </span>
-        {cd(d.remainingMs, fs(16))}
+        <FitLine max={large ? fs(15) : fs(12)} min={8} className="flex-1">
+          {st.label ? `${st.label} · ` : ""}{d.pos ? `P${d.pos} ` : ""}#{d.num} {d.team} · {fmtGapMs(d.gapMs)} · {threat ? "−" : "+"}
+          {(d.closingMs / 1000).toFixed(1)} s/t
+        </FitLine>
+        {cd(d.remainingMs, fs(large ? 20 : 14))}
       </div>
     );
   };
-  // groupes d'alertes (menus déroulants) ; "soonest" = alerte la plus proche du groupe
-  const groups = [
-    {
-      key: "ahead",
-      title: "Devant nous au général",
-      rows: zones ? zones.ahead : [],
-      closing: zones ? zones.ahead.filter((z) => z.kind === "closing") : [],
-      render: zoneRow,
-      threat: false,
-    },
-    {
-      key: "behind",
-      title: "Derrière nous au général",
-      rows: zones ? zones.behind : [],
-      closing: zones ? zones.behind.filter((z) => z.kind === "closing") : [],
-      render: zoneRow,
-      threat: true,
-    },
-    { key: "track", title: "Trafic sur la piste", rows: prio, closing: prio, render: trackRow, threat: null },
-  ].filter((g) => g.rows.length > 0);
-  const BLUE = "#4da3ff"; // meilleurs temps et intermédiaires
-  const GREEN = "#39ff14"; // notre voiture
+  const BLUE = "#5cc8ff"; // meilleurs temps et intermédiaires (bleu clair, bien distinct du fond)
+  const tcls = big ? "text-[11px]" : "text-[10px]";
   const isBest = (v, b) => v != null && b != null && v <= b;
   const sec = (v, b) => (
     <span style={isBest(v, b) ? { color: BLUE, fontWeight: 800 } : undefined} className={isBest(v, b) ? "" : "text-white"}>
@@ -862,22 +841,22 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", 
   );
   const gapTxt = (r) =>
     !r.gap ? "–" : r.gap.laps ? `${r.gap.laps} tr` : fmtGapMs(r.gap.ms);
-  const rowCls = "grid items-center gap-x-1.5 font-mono text-[10px]";
-  const cols = { gridTemplateColumns: "2.2rem 1fr 4rem 2.6rem 2.6rem 2.6rem 3.4rem" };
+  const rowCls = `grid items-center gap-x-1.5 font-mono whitespace-nowrap ${tcls}`;
+  const cols = { gridTemplateColumns: big ? "1.9rem minmax(3rem,1fr) 3.8rem 2.7rem 2.7rem 2.7rem 3.9rem" : "2.2rem 1fr 4rem 2.6rem 2.6rem 2.6rem 3.4rem" };
   const line = (r, me) => (
     <div
       key={r.num}
-      className={`${rowCls} px-1 py-0.5 ${me ? "rounded font-black" : "text-white/80"}`}
-      style={me ? { ...cols, color: GREEN, backgroundColor: "rgba(57,255,20,0.14)", boxShadow: `inset 0 0 0 1px ${GREEN}` } : cols}
+      className={`${rowCls} px-1 py-0.5 ${me ? "rounded font-black" : "text-white"}`}
+      style={me ? { ...cols, color: "#000", backgroundColor: "#ffe600" } : cols}
     >
       <span>P{r.pos}</span>
       <span className="truncate font-sans">
         #{r.num} {r.team}
       </span>
-      <span style={isBest(r.last, r.best) ? { color: BLUE, fontWeight: 800 } : undefined}>{fmtMs(r.last)}</span>
-      <span style={isBest(r.s1, r.s1b) ? { color: BLUE, fontWeight: 800 } : undefined}>{fmtSec1(r.s1)}</span>
-      <span style={isBest(r.s2, r.s2b) ? { color: BLUE, fontWeight: 800 } : undefined}>{fmtSec1(r.s2)}</span>
-      <span style={isBest(r.s3, r.s3b) ? { color: BLUE, fontWeight: 800 } : undefined}>{fmtSec1(r.s3)}</span>
+      <span style={isBest(r.last, r.best) ? { color: me ? "#0033cc" : BLUE, fontWeight: 800 } : undefined}>{fmtMs(r.last)}</span>
+      <span style={isBest(r.s1, r.s1b) ? { color: me ? "#0033cc" : BLUE, fontWeight: 800 } : undefined}>{fmtSec1(r.s1)}</span>
+      <span style={isBest(r.s2, r.s2b) ? { color: me ? "#0033cc" : BLUE, fontWeight: 800 } : undefined}>{fmtSec1(r.s2)}</span>
+      <span style={isBest(r.s3, r.s3b) ? { color: me ? "#0033cc" : BLUE, fontWeight: 800 } : undefined}>{fmtSec1(r.s3)}</span>
       <span className="text-right">
         {me ? "" : (r.ahead ? "▲ " : "▼ ") + gapTxt(r)}
       </span>
@@ -885,7 +864,7 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", 
   );
   const tableEl = nb ? (
         <div className="flex flex-col gap-0.5 pt-1 border-t border-white/10">
-          <div className={`${rowCls} px-1 text-white/40 uppercase text-[9px]`} style={cols}>
+          <div className={`${rowCls} px-1 text-white/60 uppercase`} style={cols}>
             <span>Pos</span>
             <span>Voiture</span>
             <span>Tour</span>
@@ -901,8 +880,8 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", 
   ) : null;
   if (part === "table")
     return nb ? (
-      <div className="rounded bg-black/40 px-2 py-1.5 flex flex-col gap-1 text-[10px] font-mono text-white/80">
-        <div className="text-[10px] font-black uppercase tracking-wide text-white/60 font-sans">Classement autour de nous</div>
+      <div className={`rounded bg-black/80 px-2 py-1.5 flex flex-col gap-1 font-mono text-white ${tcls}`}>
+        <div className={`font-black uppercase tracking-wide text-white/70 font-sans ${tcls}`}>Classement autour de nous</div>
         {tableEl}
       </div>
     ) : null;
@@ -975,90 +954,74 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", 
       {part !== "table" && part !== "stats" && (
         <div className="flex flex-col gap-2 pt-1 border-t border-white/10">
           {(() => {
-            // un rectangle par famille d'estimations : piste (bleu) puis classement général (violet)
-            const boxes = [
-              { key: "track", title: "🏁 Trafic sur la piste", sub: "voitures proches de nous sur le circuit, tous rangs", color: "#38bdf8", bg: "rgba(14,165,233,0.12)", keys: ["track"] },
-              { key: "gen", title: "🏆 Dépassements au classement général", sub: "les 3 devant et les 3 derrière nous", color: "#c084fc", bg: "rgba(168,85,247,0.14)", keys: ["ahead", "behind"] },
-            ];
-            return boxes.map((box) => {
-              const gs = groups.filter((g) => box.keys.includes(g.key));
-              const urg = gs
-                .flatMap((g) =>
-                  g.closing.map((r) => ({
-                    r,
-                    threat: g.key === "track" ? r.dir === "threat" : g.threat,
-                    where: g.key === "track" ? "piste" : g.key === "ahead" ? "devant" : "derrière",
-                  }))
-                )
-                .sort((a, b) => a.r.remainingMs - b.r.remainingMs)[0];
+            const urgent = [...trackRows].sort((a, b) => a.remainingMs - b.remainingMs);
+            // classement général : les 3 devant et les 3 derrière, sans couleur, avec l'estimation du temps avant dépassement
+            const zRow = (z) => {
+              const ahead = z.dir === "ahead";
+              let right;
+              if (z.kind === "closing") right = fmtCountdown(z.remainingMs);
+              else if (z.kind === "lapped") right = `à ${z.gapLaps} tr`;
+              else if (z.kind === "away") right = z.farOff ? "–" : "s'éloigne";
+              else right = "–";
               return (
-                <div key={box.key} className="rounded-lg p-1.5 flex flex-col gap-1" style={{ backgroundColor: box.bg, border: `2px solid ${box.color}` }}>
-                  <div className="flex flex-col font-sans leading-tight">
-                    <span className="font-black uppercase tracking-wide" style={{ color: box.color, fontSize: fs(12) }}>{box.title}</span>
-                    <span className="text-white/50" style={{ fontSize: fs(10) }}>{box.sub}</span>
-                  </div>
-                  {urg ? (
-                    (() => {
-                      const st = alertStyle(urg.threat, urg.r.level, urg.r.remainingMs);
-                      return (
-                        <div
-                          className="font-sans font-black leading-tight rounded px-2 py-1.5 flex items-center justify-between gap-2"
-                          style={{ backgroundColor: st.bg, color: st.fg, fontSize: fs(14) }}
-                        >
-                          <span>
-                            {urg.threat ? (st.hot ? "⚠ ON VA NOUS DÉPASSER" : "↘ Va nous dépasser") : st.hot ? "⚠ NOUS DÉPASSONS" : "↗ Nous allons dépasser"}
-                            <span className="block font-bold" style={{ fontSize: fs(11) }}>
-                              {urg.r.pos ? `P${urg.r.pos} ` : ""}#{urg.r.num} {urg.r.team} · {urg.where}
-                            </span>
-                          </span>
-                          {cd(urg.r.remainingMs, fs(30))}
-                        </div>
-                      );
-                    })()
-                  ) : (
-                    <div className="rounded px-2 py-1 bg-white/5 text-white/60 font-sans font-semibold" style={{ fontSize: fs(11) }}>
-                      Aucun dépassement prévu pour le moment
-                    </div>
-                  )}
-                  {gs.map((g) => {
-                    const open = !!openZ[g.key];
-                    const soon = [...g.closing].sort((a, b) => a.remainingMs - b.remainingMs)[0];
-                    const cst = soon ? alertStyle(g.key === "track" ? soon.dir === "threat" : g.threat, soon.level, soon.remainingMs) : null;
-                    return (
-                      <div key={g.key} className="flex flex-col gap-1">
-                        <button
-                          type="button"
-                          onClick={() => setOpenZ((o) => ({ ...o, [g.key]: !o[g.key] }))}
-                          className="flex items-center justify-between gap-2 rounded bg-black/30 hover:bg-black/45 px-2 py-1 text-left"
-                        >
-                          <span className="font-black uppercase tracking-wide text-white/80" style={{ fontSize: fs(10) }}>
-                            {open ? "▾" : "▸"} {g.title} ({g.rows.length})
-                          </span>
-                          {soon ? (
-                            <span className="rounded px-1.5 py-0.5 flex items-center gap-1.5" style={{ backgroundColor: cst.bg, color: cst.fg, fontSize: fs(10) }}>
-                              <b className="font-sans">#{soon.num}</b>
-                              {cd(soon.remainingMs, fs(12))}
-                            </span>
-                          ) : (
-                            <span className="text-white/40" style={{ fontSize: fs(10) }}>rien à signaler</span>
-                          )}
-                        </button>
-                        {open && (
-                          <div className="flex flex-col gap-1">
-                            {g.rows.slice(0, big ? 3 : 6).map(g.render)}
-                            {g.rows.length > (big ? 3 : 6) && (
-                              <div className="text-white/50 font-sans" style={{ fontSize: fs(10) }}>
-                                + {g.rows.length - (big ? 3 : 6)} autres voitures plus lointaines
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
+                <div key={z.dir + z.num} className="flex items-center justify-between gap-2 px-1 text-white font-sans">
+                  <FitLine max={fs(11)} min={9} className="flex-1">
+                    <span className="text-white/60">{ahead ? "↗ devant" : "↘ derrière"}</span> P{z.pos} #{z.num} {z.team}
+                    {z.gapMs != null && <span className="text-white/60"> · {fmtGapMs(z.gapMs)}</span>}
+                  </FitLine>
+                  <span className="font-mono tabular-nums font-black" style={{ fontSize: fs(12) }}>{right}</span>
                 </div>
               );
-            });
+            };
+            return (
+              <>
+                {[
+                  { key: "chase", title: "🏁 Estimation avant dépassement", color: "#facc15", rows: urgent.filter((d) => d.dir === "chase"), none: "Aucune voiture à dépasser dans l'immédiat" },
+                  { key: "threat", title: "🏁 Estimation avant de nous faire dépasser", color: "#38bdf8", rows: urgent.filter((d) => d.dir === "threat"), none: "Personne ne vient nous dépasser dans l'immédiat" },
+                ].map((box) => (
+                  <div key={box.key} className="rounded-lg p-1.5 flex flex-col gap-1 bg-black/40" style={{ border: `2px solid ${box.color}` }}>
+                    <span className="font-black uppercase tracking-wide font-sans" style={{ color: box.color, fontSize: fs(12) }}>{box.title}</span>
+                    {box.rows.length > 0 ? (
+                      box.rows.map((d) => trackRow(d, true))
+                    ) : (
+                      <div className="rounded px-2 py-1 bg-white/5 text-white/60 font-sans font-semibold" style={{ fontSize: fs(11) }}>{box.none}</div>
+                    )}
+                  </div>
+                ))}
+                {zones && (() => {
+                  // devant : seulement les équipages plus lents que nous (rythme des 5 derniers tours) ;
+                  // derrière : les 3 voisins, plus tout équipage plus rapide qui peut nous dépasser
+                  const genRows = [
+                    ...zones.ahead.filter((z) => z.kind === "closing"),
+                    ...zones.behind.filter((z, i) => i < 3 || z.kind === "closing"),
+                  ];
+                  const shown = genRows.slice(0, 5);
+                  const rest = genRows.slice(5);
+                  return (
+                    <div className="rounded-lg p-1.5 flex flex-col gap-0.5 bg-black/40 border border-white/25">
+                      <span className="font-black uppercase tracking-wide font-sans text-white/80" style={{ fontSize: fs(12) }}>
+                        🏆 Général · dépassement estimé
+                      </span>
+                      {genRows.length === 0 && <span className="text-white/60 font-sans px-1" style={{ fontSize: fs(11) }}>Aucun équipage concerné pour le moment</span>}
+                      {shown.map(zRow)}
+                      {rest.length > 0 && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => setGenOpen((o) => !o)}
+                            className="text-left rounded bg-black/30 hover:bg-black/45 px-2 py-0.5 text-white/80 font-black uppercase tracking-wide"
+                            style={{ fontSize: fs(10) }}
+                          >
+                            {genOpen ? "▾" : "▸"} {rest.length} autre{rest.length > 1 ? "s" : ""} équipage{rest.length > 1 ? "s" : ""}
+                          </button>
+                          {genOpen && rest.map(zRow)}
+                        </>
+                      )}
+                    </div>
+                  );
+                })()}
+              </>
+            );
           })()}
         </div>
       )}
@@ -3262,26 +3225,31 @@ export default function PitBoard() {
         fontFamily: "'Barlow Condensed', 'Arial Narrow', Helvetica, Arial, sans-serif",
       }}
     >
-      <div className="max-w-7xl mx-auto px-3 py-4 pb-20">
+      <div className={`max-w-7xl mx-auto px-3 pb-20 ${myCar ? "py-2" : "py-4"}`}>
         <style>{"@keyframes pbblink{0%,100%{background:#ff1f1f;color:#fff}50%{background:#ffe600;color:#000}}"}</style>
         {/* EN-TÊTE + HORLOGE + DÉCOMPTE + BOUTONS (une seule ligne) */}
-        <div className="flex items-center justify-between gap-3 flex-wrap mb-4 bg-black/20 rounded-lg px-3 py-2">
+        <div className={`flex items-center justify-between gap-x-3 gap-y-1 flex-wrap ${myCar ? "mb-2" : "mb-4"} relative overflow-hidden rounded-lg pl-6 pr-3 py-1.5 border-b-4 border-[#e10600]`} style={{ background: "linear-gradient(100deg,#050505 0%,#141414 55%,#2a0505 100%)" }}>
+          <div
+            aria-hidden="true"
+            className="absolute left-0 top-0 bottom-0 w-3.5"
+            style={{ backgroundImage: "conic-gradient(#fff 25%, #000 0 50%, #fff 0 75%, #000 0)", backgroundSize: "14px 14px" }}
+          />
           <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-md flex items-center justify-center border-2 bg-black/20 border-black text-black flex-shrink-0">
+            <div className="w-8 h-8 rounded-md flex items-center justify-center border-2 bg-white/15 border-white/60 text-white flex-shrink-0">
               <Flag size={16} />
             </div>
             <div>
-              <h1 className="text-black text-lg tracking-wide font-black leading-none whitespace-nowrap">
+              <h1 className="text-white text-[15px] tracking-wide font-black italic uppercase leading-none whitespace-nowrap" style={{ textShadow: "2px 2px 0 #e10600" }}>
                 Gestion Team manager by JFP racing
               </h1>
-              <p className="text-black/60 text-[10px] tracking-widest uppercase font-semibold whitespace-nowrap">
+              <p className={`text-white/70 text-[10px] tracking-widest uppercase font-semibold whitespace-nowrap ${myCar ? "hidden" : ""}`}>
                 Gestion des arrêts au stand
               </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5 text-black font-mono font-bold text-base">
-            <Clock size={15} className="text-black/60" />
+          <div className="flex items-center gap-1.5 text-white font-mono font-bold text-base">
+            <Clock size={15} className="text-white/70" />
             {fmtClock(now)}
           </div>
 
@@ -3289,8 +3257,8 @@ export default function PitBoard() {
             const evt = getEventStatus(settings, now);
             if (!evt) return null;
             return (
-              <div className="flex items-center gap-1.5 text-black/90 text-xs font-semibold">
-                <span className="text-black/50 text-[10px] uppercase tracking-widest">{evt.label}</span>
+              <div className="flex items-center gap-1.5 text-white text-xs font-semibold">
+                <span className="text-white/70 text-[10px] uppercase tracking-widest">{evt.label}</span>
                 {evt.seconds > 0 && (
                   <span className="font-mono font-black text-sm">{fmtTimeHMS(evt.seconds)}</span>
                 )}
@@ -3301,7 +3269,7 @@ export default function PitBoard() {
           <div className="flex items-center gap-2">
             <button
               onClick={() => setAdvancedMode((s) => !s)}
-              className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide bg-black/20 text-black"
+              className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide bg-white/15 text-white"
               title="Affiche/masque le contrôle technique et les messages d'équipe"
             >
               {advancedMode ? "🔧 Mode avancé" : "⚡ Mode simple"}
@@ -3309,7 +3277,7 @@ export default function PitBoard() {
             {isAdmin && (
               <button
                 onClick={toggleRecap}
-                className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide bg-black/20 text-black"
+                className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide bg-white/15 text-white"
                 title="Vue récapitulative compacte (toutes les tuiles fermées sur un seul écran) ou vue détaillée"
               >
                 {recap ? "▦ Vue récap" : "▤ Vue détaillée"}
@@ -3318,7 +3286,7 @@ export default function PitBoard() {
             {isAdmin && (
               <button
                 onClick={() => setShowSettings((s) => !s)}
-                className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide bg-black/20 text-black"
+                className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide bg-white/15 text-white"
                 title="Réglages fuel (pompes / délai)"
               >
                 <Settings2 size={12} /> Réglages
@@ -3346,13 +3314,13 @@ export default function PitBoard() {
                   } catch (e) {}
                 }
               }}
-              className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide bg-black/20 text-black"
+              className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide bg-white/15 text-white"
               title="Activer/couper l'annonce vocale — cliquez pour tester"
             >
               {soundOn ? "🔊 Voix ON" : "🔇 Voix OFF"}
             </button>
             <div
-              className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide bg-black/20 text-black"
+              className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide bg-white/15 text-white"
               title={
                 connectionStatus === "connected"
                   ? "Connecté"
@@ -3367,7 +3335,7 @@ export default function PitBoard() {
             </div>
             {settings.liveEnabled && (
               <div
-                className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide bg-black/20 text-black"
+                className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide bg-white/15 text-white"
                 title={
                   !liveInfo
                     ? "Aucune donnée reçue pour cet uuid. Un poste Admin doit être ouvert pour relayer le flux."
@@ -3394,7 +3362,7 @@ export default function PitBoard() {
             <button
               onClick={resetRoleAndCar}
               title="Changer de rôle"
-              className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide bg-black/20 text-black"
+              className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide bg-white/15 text-white"
             >
               👤{" "}
               {role === "admin"
@@ -3438,11 +3406,20 @@ export default function PitBoard() {
           </div>
         )}
 
-        {showSettings && (
+        {showSettings && isAdmin && (
           <div className="rounded-lg border-2 border-black/30 mb-4 p-3 bg-black/40">
-            <h2 className="text-white font-bold tracking-wide uppercase text-xs mb-2 flex items-center gap-2">
-              <Settings2 size={14} /> Réglages fuel
-            </h2>
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <h2 className="text-white font-bold tracking-wide uppercase text-xs flex items-center gap-2">
+                <Settings2 size={14} /> Réglages fuel
+              </h2>
+              <button
+                type="button"
+                onClick={() => setShowSettings(false)}
+                className="px-3 py-1 rounded-md text-xs font-bold uppercase bg-white text-black hover:bg-white/80"
+              >
+                ✕ Fermer
+              </button>
+            </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <label className="flex flex-col gap-1 text-white text-xs">
                 Nombre de pompes (voitures au fuel en même temps)
@@ -4016,7 +3993,7 @@ export default function PitBoard() {
 
         {/* GRILLE DE DÉPART */}
         <div className="mb-4">
-          <h2 className="text-white font-bold tracking-wide uppercase text-xs mb-2 flex items-center gap-2">
+          <h2 className={`text-white font-bold tracking-wide uppercase text-xs mb-2 items-center gap-2 ${myCar ? "hidden" : "flex"}`}>
             <Timer size={14} /> Grille des annonces ({carTiles.filter((t) => t.call).length} active
             {carTiles.filter((t) => t.call).length > 1 ? "s" : ""})
           </h2>
@@ -4620,58 +4597,44 @@ export default function PitBoard() {
                   const relaySec = onTrackM ? (now - stM.lastExitAt) / 1000 : null;
                   const fuelColor = fuelM && fuelM.calibrated ? (fuelM.status === "CRITICAL" ? "#ff3b3b" : fuelM.status === "WARNING" ? "#ffd400" : "#4ade80") : "#9ca3af";
                   const lapsLeft = fuelM && fuelM.calibrated && settings.circuitLengthKm > 0 && fuelM.autonomyKm ? fuelM.autonomyKm / settings.circuitLengthKm : null;
+                  const dsT = dsM && dsM.curDriver ? dsM.totals[dsM.curDriver.id] : null;
                   const topBar = (
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-2">
-                      <div className="rounded-xl bg-black/70 border-2 px-3 py-1" style={{ borderColor: fuelColor }}>
-                        <div className="flex items-center justify-between gap-3">
-                          <span className="text-white/70 text-[11px] font-black uppercase tracking-widest">⛽ Jauge d'essence</span>
-                          {fuelM && fuelM.calibrated && (
-                            <span className="font-mono text-sm font-black" style={{ color: fuelColor }}>
-                              {fuelM.fuelRemaining.toFixed(1)} L · {fuelM.pct.toFixed(0)} %
-                            </span>
-                          )}
-                        </div>
+                      <div className="rounded-xl bg-black/80 border-2 px-3 py-1.5 flex items-center gap-3" style={{ borderColor: fuelColor }}>
+                        <span className="text-white text-sm font-black uppercase tracking-wide whitespace-nowrap">⛽ Essence</span>
                         {fuelM && fuelM.calibrated ? (
                           <>
-                            <div className="h-2 rounded-full bg-white/15 overflow-hidden my-1">
-                              <div className="h-full rounded-full" style={{ width: `${Math.max(2, Math.min(100, fuelM.pct))}%`, backgroundColor: fuelColor }} />
+                            <span className="font-mono text-base font-black whitespace-nowrap text-white">
+                              {fuelM.fuelRemaining.toFixed(1)} L · {fuelM.pct.toFixed(0)} %
+                            </span>
+                            <div className="flex-1 min-w-[60px] h-3.5 rounded-full bg-white/20 border border-white/70 overflow-hidden">
+                              <div className="h-full" style={{ width: `${Math.max(2, Math.min(100, fuelM.pct))}%`, backgroundColor: fuelColor }} />
                             </div>
-                            <div className="flex items-baseline gap-2 text-white">
-                              <span className="font-black leading-none" style={{ fontSize: 26, color: fuelColor }}>
-                                {lapsLeft != null ? lapsLeft.toFixed(1) : fuelM.autonomyKm ? fuelM.autonomyKm.toFixed(0) : "?"}
-                              </span>
-                              <span className="text-sm font-bold">{lapsLeft != null ? "tours restants" : "km restants"}</span>
-                              <span className="ml-auto font-mono text-sm text-white/70">{fuelM.autonomyMin ? fmtTimeHMS(fuelM.autonomyMin * 60) : ""}</span>
-                            </div>
+                            <span className="font-black leading-none whitespace-nowrap" style={{ fontSize: 24, color: fuelColor }}>
+                              {lapsLeft != null ? lapsLeft.toFixed(1) : fuelM.autonomyKm ? fuelM.autonomyKm.toFixed(0) : "?"}
+                              <span className="text-sm font-bold text-white ml-1">{lapsLeft != null ? "tours" : "km"}</span>
+                            </span>
+                            <span className="font-mono text-base font-bold text-white whitespace-nowrap">{fuelM.autonomyMin ? fmtTimeHMS(fuelM.autonomyMin * 60) : ""}</span>
                           </>
                         ) : (
-                          <div className="text-white/50 text-xs py-1">
-                            {onTrackM ? "Calibration insuffisante : enregistrez un ravitaillement dans le contrôle technique." : "Voiture au stand : la jauge repart à la sortie."}
-                          </div>
+                          <span className="text-white/70 text-sm font-semibold">
+                            {onTrackM ? "Calibration insuffisante : enregistrez un ravitaillement (contrôle technique)." : "Voiture au stand : la jauge repart à la sortie."}
+                          </span>
                         )}
                       </div>
-                      <div className="rounded-xl bg-black/70 border-2 border-white/40 px-3 py-1">
-                        <div className="flex items-center justify-between gap-3">
-                          <span className="text-white/70 text-[11px] font-black uppercase tracking-widest">⏱ Relais du pilote</span>
-                          <span className="text-white/60 text-xs font-bold">Relais {((stM && stM.log) || []).length + 1}</span>
-                        </div>
-                        <div className="flex items-baseline gap-3 text-white">
-                          <span className="font-mono font-black leading-none" style={{ fontSize: 26 }}>
-                            {relaySec != null ? fmtTimeHMS(relaySec) : "--:--:--"}
+                      <div className="rounded-xl bg-black/80 border-2 border-white/50 px-3 py-1.5 flex items-center gap-3">
+                        <span className="text-white text-sm font-black uppercase tracking-wide whitespace-nowrap">⏱ Relais {((stM && stM.log) || []).length + 1}</span>
+                        <span className="font-mono font-black leading-none text-white whitespace-nowrap" style={{ fontSize: 24 }}>
+                          {relaySec != null ? fmtTimeHMS(relaySec) : "--:--:--"}
+                        </span>
+                        <span className="text-lg font-black text-white whitespace-nowrap">
+                          {dsM && dsM.curDriver ? driverName(dsM.curDriver) || "Pilote sans nom" : ""}
+                        </span>
+                        {dsT && (
+                          <span className="ml-auto text-white text-[17px] font-mono font-bold whitespace-nowrap" title="Temps de roulage total, sous drapeau vert / jaune / rouge">
+                            Σ {fmtTimeHMS(dsT.total)} 🟢{fmtTimeHMS(dsT.vert)} 🟡{fmtTimeHMS(dsT.jaune)}
+                            {dsT.rouge >= 5 && <> 🔴{fmtTimeHMS(dsT.rouge)}</>}
                           </span>
-                          <span className="text-base font-black truncate">
-                            {dsM && dsM.curDriver ? driverName(dsM.curDriver) || "Pilote sans nom" : ""}
-                          </span>
-                        </div>
-                        {dsM && dsM.curDriver && dsM.totals[dsM.curDriver.id] && (
-                          <div className="text-white/70 text-[11px] font-mono">
-                            Roulage {fmtTimeHMS(dsM.totals[dsM.curDriver.id].total)}{" "}
-                            <span className="text-white/50">
-                              🟢{fmtTimeHMS(dsM.totals[dsM.curDriver.id].vert)} 🟡{fmtTimeHMS(dsM.totals[dsM.curDriver.id].jaune)}
-                              {dsM.totals[dsM.curDriver.id].rouge >= 5 && <> 🔴{fmtTimeHMS(dsM.totals[dsM.curDriver.id].rouge)}</>}
-                              {" "}· {dsM.totals[dsM.curDriver.id].relays} relais
-                            </span>
-                          </div>
                         )}
                       </div>
                     </div>
@@ -4679,7 +4642,7 @@ export default function PitBoard() {
                   return (
                     <FitToScreen>
                     {topBar}
-                    <div className="w-full grid gap-3 items-start grid-cols-1 lg:grid-cols-[58%_minmax(0,1fr)] xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)_minmax(0,1.1fr)]">
+                    <div className="w-full grid gap-2 items-start rounded-2xl bg-black/65 p-2 grid-cols-1 lg:grid-cols-[58%_minmax(0,1fr)] xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.3fr)_minmax(0,1.1fr)]">
                       <div className="w-full order-2 lg:order-1">{carTiles.map((t) => renderTile(t))}</div>
                       {myLive && (
                         <div className="hidden xl:block order-2 sticky top-0">
@@ -4707,6 +4670,7 @@ export default function PitBoard() {
                               now={now}
                               showTable
                               part="table"
+                              big
                             />
                           </div>
                         )}
