@@ -856,26 +856,33 @@ function AroundTable({ data, prio, myPos, now, stale, nA, nB, setNA, setNB }) {
     const d = (prio || []).find((x) => x.num === n);
     return d ? fmtCountdown(d.remainingMs) : "";
   };
-  const trend = (r) => {
-    if (r.trendMs == null) return <span className="text-white/40">–</span>;
-    if (r.trendMs < -300) return <span style={{ color: "#38bdf8" }}>↘ se rapproche {fmtGapMs(-r.trendMs)}</span>;
-    if (r.trendMs > 300) return <span className="text-white/60">↗ s'éloigne {fmtGapMs(r.trendMs)}</span>;
-    return <span className="text-white/60">= stable</span>;
+  const trend = (r, tinted) => {
+    if (r.trendMs == null) return <span className={tinted ? "" : "text-white/40"}>–</span>;
+    if (r.trendMs < -300) return <span style={tinted ? undefined : { color: "#38bdf8" }}>↘ se rapproche {fmtGapMs(-r.trendMs)}</span>;
+    if (r.trendMs > 300) return <span className={tinted ? "" : "text-white/60"}>↗ s'éloigne {fmtGapMs(r.trendMs)}</span>;
+    return <span className={tinted ? "" : "text-white/60"}>= stable</span>;
   };
-  const row = (r, key) => (
-    <div key={key + r.num} className="grid items-center gap-2 px-2 py-0.5 text-white font-sans border-b border-white/10" style={{ ...cols, fontSize: 12 }}>
-      <span className="text-white/60">P{r.pos}</span>
+  // devant nous sur la piste mais derrière au général = vert fluo ; derrière nous sur la piste mais devant au général = rouge
+  const tint = (r, key) => (myPos == null ? null : key === "a" && r.pos > myPos ? "green" : key === "b" && r.pos < myPos ? "red" : null);
+  const row = (r, key) => {
+    const t = tint(r, key);
+    const cls = t === "green" ? "text-black bg-[#39ff14] font-bold" : t === "red" ? "text-white bg-red-600 font-bold" : "text-white";
+    const sub = t === "green" ? "text-black/70" : "text-white/60";
+    return (
+    <div key={key + r.num} className={`grid items-center gap-2 px-2 py-0.5 font-sans border-b border-white/10 ${cls}`} style={{ ...cols, fontSize: 12 }}>
+      <span className={sub}>P{r.pos}</span>
       <span className="font-black">#{r.num}</span>
-      {hasCls && <span className="truncate text-white/80">{r.cat}</span>}
+      {hasCls && <span className={`truncate ${t ? "" : "text-white/80"}`}>{r.cat}</span>}
       {hasCls && <span className="font-mono tabular-nums font-black">{r.pic != null ? `${r.pic}e` : ""}</span>}
       <span className="truncate">{r.team}</span>
       <span className="font-mono tabular-nums font-black text-right">
-        {fmtGapMs(Math.abs(r.gapMs))} <span className="text-white/50 font-sans font-normal">{r.point}</span>
+        {fmtGapMs(Math.abs(r.gapMs))} <span className={`font-sans font-normal ${t ? "opacity-70" : "text-white/50"}`}>{r.point}</span>
       </span>
-      <span>{trend(r)}</span>
+      <span>{trend(r, !!t)}</span>
       <span className="font-mono tabular-nums font-black text-right">{eta(r.num)}</span>
     </div>
-  );
+    );
+  };
   const band = (txt, extra) => <div className={`px-2 py-0.5 font-black uppercase tracking-wide text-xs ${extra}`}>{txt}</div>;
   if (!data) return <div className="text-white/70 font-sans text-sm p-2">Pas encore assez de données (il faut quelques tours de notre voiture).</div>;
   const ref = data.ref;
