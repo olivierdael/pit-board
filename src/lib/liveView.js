@@ -111,7 +111,7 @@ export function visibleRcMessages(rc, wanted, nowMs, seen, dismissed, generatedA
 const paceStore = {};
 
 // enregistre le dernier tour de chaque voiture (une seule fois par numéro de tour)
-export function updatePace(cars, store = paceStore) {
+export function updatePace(cars, store = paceStore, hist = lapStore) {
   for (const num of Object.keys(cars || {})) {
     const c = cars[num];
     if (!c || c.last == null || c.laps == null) continue;
@@ -120,8 +120,17 @@ export function updatePace(cars, store = paceStore) {
     e.lastLap = c.laps;
     e.times.push(c.last);
     if (e.times.length > 8) e.times.shift();
+    // historique des derniers tours avec leurs secteurs (pour les heures de passage aux intermédiaires)
+    if (c.lapEnd != null) {
+      const h = hist[num] || (hist[num] = []);
+      const sOk = c.s1 != null && c.s2 != null && c.s3 != null && Math.abs(c.s1 + c.s2 + c.s3 - c.last) <= 0.03 * c.last;
+      h.push({ end: c.lapEnd, lt: c.last, s: sOk ? [c.s1, c.s2, c.s3] : null });
+      if (h.length > 8) h.shift();
+    }
   }
 }
+// derniers tours terminés de chaque voiture : { end (heure du passage de la ligne), lt (temps du tour), s ([S1,S2,S3] ou null) }
+const lapStore = {};
 
 // rythme (ms/tour) = médiane des derniers tours "normaux" (on écarte les tours > 115 % du meilleur : stand, neutralisation)
 export function paceOf(num, car, store = paceStore) {
@@ -319,10 +328,152 @@ function duelEstimatesTrackLive(cars, myNum, remainingMs, store, windowMs, nowMs
   return seen ? { threats, chases, onTrack: true } : null;
 }
 
+// ---------- Méthode "gap au dernier point commun" ----------
+// Chaque voiture franchit des points de chronométrage (S1, S2, ligne) dont le flux donne l'heure exacte. Pour une autre voiture X :
+//  1. on prend le dernier point que nous ET X avons franchi : l'écart exact = heure de X - notre heure à ce même point ;
+//  2. on avance point par point avec le temps de secteur habituel de chacune (médiane de ses derniers tours) ;
+//  3. le premier point où l'ordre s'inverse donne le dépassement, et l'heure estimée (interpolée) donne le compte à rebours.
+// Seules les heures du flux sont utilisées pour l'écart : pas de position estimée en continu, pas de dérive entre deux points.
+const med5 = (a) => {
+  const s = [...a].sort((x, y) => x - y);
+  return s[s.length >> 1];
+};
+
+// temps de secteur attendus [S1,S2,S3] : médiane des 3 derniers tours normaux ; à défaut, le rythme de la voiture réparti comme notre meilleur tour
+function expectedSectors(num, c, ref, store, hist) {
+  const pace = paceOf(num, c, store);
+  if (!pace) return null;
+  const hs = (hist[num] || []).filter((h) => h.s && h.lt <= pace * 1.1).slice(-3);
+  if (hs.length >= 2) return [0, 1, 2].map((k) => med5(hs.map((h) => h.s[k])));
+  if (!ref || ref.s1b == null || ref.s2b == null || ref.s3b == null) return null;
+  const tot = ref.s1b + ref.s2b + ref.s3b;
+  return [ref.s1b, ref.s2b, ref.s3b].map((b) => (b * pace) / tot);
+}
+
+// points de chronométrage connus de la voiture jusqu'à l'instant T : [{ t, k (0=S1, 1=S2, 2=ligne), bad }]
+function pointTimeline(num, c, T, exp, hist) {
+  const pts = [];
+  const lap = exp[0] + exp[1] + exp[2];
+  const hs = (hist[num] || []).slice(-4);
+  let lastEnd = null;
+  for (const h of hs) {
+    if (lastEnd != null && h.end <= lastEnd) continue;
+    const s = h.s || exp.map((v) => (v * h.lt) / lap);
+    const st = h.end - h.lt;
+    const bad = h.lt > lap * 1.25 || h.lt < lap * 0.6;
+    pts.push({ t: st + s[0], k: 0, bad }, { t: Math.min(h.end, st + s[0] + s[1]), k: 1, bad }, { t: h.end, k: 2, bad });
+    lastEnd = h.end;
+  }
+  if (c.lapEnd == null) return pts;
+  if (lastEnd == null || c.lapEnd > lastEnd) pts.push({ t: c.lapEnd, k: 2, bad: false }); // dernier passage de la ligne
+  const e = T - c.lapEnd;
+  const off = OFF_TRACK.test(c.state || "") || e > lap * 1.5;
+  const plaus = (v, b) => v != null && v >= 0.6 * b && v <= 1.6 * b;
+  const a1 = plaus(c.s1, exp[0]) ? c.s1 : exp[0];
+  const a2 = plaus(c.s2, exp[1]) ? c.s2 : exp[1];
+  if (e >= a1) pts.push({ t: c.lapEnd + a1, k: 0, bad: off });
+  if (e >= a1 + a2) pts.push({ t: c.lapEnd + a1 + a2, k: 1, bad: off });
+  return pts.filter((p) => p.t <= T);
+}
+
+// la voiture devrait déjà avoir franchi son prochain point (avec une marge) : sa position n'est plus fiable
+function isOverdue(lastPt, sec, nowMs) {
+  const next = sec[(lastPt.k + 1) % 3];
+  return nowMs > lastPt.t + next + Math.max(5000, 0.1 * next);
+}
+
+function nearestSame(pts, k, t, maxDiff) {
+  let best = -1;
+  let bd = maxDiff;
+  for (let i = 0; i < pts.length; i++) {
+    if (pts[i].k !== k) continue;
+    const d = Math.abs(pts[i].t - t);
+    if (d < bd) {
+      bd = d;
+      best = i;
+    }
+  }
+  return best;
+}
+
+function duelEstimatesPoints(cars, myNum, remainingMs, store, nowMs, hist = lapStore) {
+  const me = cars && cars[myNum];
+  if (!me || me.lapEnd == null) return null;
+  if (OFF_TRACK.test(me.state || "")) return { threats: [], chases: [], onTrack: true }; // nous sommes aux stands
+  const mySec = expectedSectors(myNum, me, me, store, hist);
+  if (!mySec) return null;
+  const myLap = mySec[0] + mySec[1] + mySec[2];
+  const myPts = pointTimeline(myNum, me, nowMs, mySec, hist);
+  const a = myPts.length - 1;
+  if (a < 1 || myPts[a].bad) return { threats: [], chases: [], onTrack: true };
+  if (isOverdue(myPts[a], mySec, nowMs)) return { threats: [], chases: [], onTrack: true }; // nous sommes en retard sur notre prochain point (entrée aux stands, ralentissement) : tout serait faux
+  const threats = [];
+  const chases = [];
+  const H = 7; // on regarde jusqu'à 7 points (≈ 2 tours) en avant
+  for (const num of Object.keys(cars)) {
+    if (num === myNum) continue;
+    const c = cars[num];
+    if (!c || c.lapEnd == null || OFF_TRACK.test(c.state || "")) continue;
+    const xSec = expectedSectors(num, c, me, store, hist);
+    if (!xSec) continue;
+    const xPts = pointTimeline(num, c, nowMs, xSec, hist);
+    const b = xPts.length - 1;
+    if (b < 0 || xPts[b].bad) continue;
+    if (nowMs - xPts[b].t > 1.5 * (xSec[0] + xSec[1] + xSec[2])) continue; // plus de nouvelle donnée : voiture arrêtée
+    if (isOverdue(xPts[b], xSec, nowMs)) continue; // en retard sur son prochain point : probablement ralentie ou aux stands
+    // dernier point commun (en partant de notre point le plus récent)
+    let ai = -1;
+    let bi = -1;
+    for (let j = 0; j < 3 && a - j >= 0; j++) {
+      const q = myPts[a - j];
+      const xi = nearestSame(xPts, q.k, q.t, 0.45 * myLap);
+      if (xi >= 0 && !q.bad && !xPts[xi].bad) {
+        ai = a - j;
+        bi = xi;
+        break;
+      }
+    }
+    if (ai < 0) continue;
+    const g0 = xPts[bi].t - myPts[ai].t; // > 0 : X est derrière nous
+    if (g0 === 0 || Math.abs(g0) > 120000) continue;
+    const sg = Math.sign(g0);
+    let tm = myPts[ai].t;
+    let tx = xPts[bi].t;
+    let gPrev = g0;
+    let tmPrev = tm;
+    let etaAt = null;
+    for (let s = 1; s <= H; s++) {
+      const km = (myPts[ai].k + s) % 3;
+      const ntm = ai + s <= a ? myPts[ai + s].t : Math.max(nowMs + 500, tm + mySec[km]);
+      const ntx = bi + s <= b ? xPts[bi + s].t : Math.max(nowMs + 500, tx + xSec[km]);
+      const g = ntx - ntm;
+      if (Math.sign(g) !== sg) {
+        const f = Math.abs(gPrev) / (Math.abs(gPrev) + Math.abs(g));
+        etaAt = tmPrev + f * (ntm - tmPrev);
+        break;
+      }
+      gPrev = g;
+      tm = ntm;
+      tx = ntx;
+      tmPrev = ntm;
+    }
+    if (etaAt == null) continue;
+    const etaMs = etaAt - nowMs;
+    if (etaMs < 0 || etaMs > 300000) continue;
+    if (remainingMs != null && etaMs > remainingMs) continue;
+    const xLap = xSec[0] + xSec[1] + xSec[2];
+    const threat = sg > 0;
+    const t = { exact: true, num, team: c.team, pos: c.pos, gapMs: Math.abs(g0), closingMs: threat ? myLap - xLap : xLap - myLap, laps: etaMs / myLap, etaMs };
+    t.level = t.laps <= 2 ? "high" : t.laps <= 5 ? "mid" : "low";
+    (threat ? threats : chases).push(t);
+  }
+  return { threats, chases, onTrack: true };
+}
+
 // Estimation des contacts avec TOUTES les voitures proches sur la piste (devant et derrière), du plus rapide à venir au plus lent.
 // renvoie { threats, chases, onTrack: true } ou null si le flux ne contient pas les heures de passage (-> repli classement)
-export function duelEstimatesTrack(cars, myNum, remainingMs, store = paceStore, windowMs = 90000, nowMs = null) {
-  if (nowMs != null) return duelEstimatesTrackLive(cars, myNum, remainingMs, store, windowMs, nowMs);
+export function duelEstimatesTrack(cars, myNum, remainingMs, store = paceStore, windowMs = 90000, nowMs = null, hist = lapStore) {
+  if (nowMs != null) return duelEstimatesPoints(cars, myNum, remainingMs, store, nowMs, hist) || duelEstimatesTrackLive(cars, myNum, remainingMs, store, windowMs, nowMs);
   const me = cars && cars[myNum];
   if (!me) return null;
   const myPace = paceOf(myNum, me, store);
@@ -399,7 +550,8 @@ export function prioritizedDuels(duel, nowMs, store = anchorStore) {
     ...duel.threats.map((d) => ({ ...d, dir: "threat" })),
     ...duel.chases.map((d) => ({ ...d, dir: "chase" })),
   ].map((d) => {
-    const etaAt = anchorEta(d.dir + d.num, Math.round(d.gapMs) + "|" + Math.round(d.closingMs / 10), d.etaMs, nowMs, store);
+    // moteur par points : l'heure est déjà calculée depuis les heures du flux (pas d'ancrage) ; sinon on la fige jusqu'au prochain recalage
+    const etaAt = d.exact ? nowMs + d.etaMs : anchorEta(d.dir + d.num, Math.round(d.gapMs) + "|" + Math.round(d.closingMs / 10), d.etaMs, nowMs, store);
     return { ...d, etaAt, remainingMs: Math.max(0, etaAt - nowMs) };
   });
   return all.sort((a, b) => a.remainingMs - b.remainingMs);
