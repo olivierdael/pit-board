@@ -22,7 +22,7 @@ import {
   observeLap,
   mergeBest,
 } from "./lib/drivers";
-import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, classDuels, trackAlertRows } from "./lib/liveView";
+import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, classDuels, trackAlertRows, trackSwaps } from "./lib/liveView";
 import {
   Flag,
   Plus,
@@ -862,6 +862,7 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", 
   const prio = duel && duel.onTrack ? prioritizedDuels(duel, now) : [];
   const trackRows = trackAlertRows(prio, live.pos);
   const zones = classDuels(neighborsOf(info.cars, num, 6), remMs, now);
+  const swaps = trackSwaps(info.cars, num, live.pos, now); // ordre réel sur la piste ≠ classement (mis à jour à la ligne)
   const K = big ? 1.3 : 1; // agrandissement des alertes quand il y a de la place
   const fs = (n) => Math.round(n * K);
   const cd = (ms, size) => (
@@ -1023,6 +1024,23 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", 
             const zRow = (z) => {
               const ahead = z.dir === "ahead";
               let right;
+              const sw = swaps[z.num];
+              if (sw) {
+                // l'ordre sur la piste contredit le classement : étiquette jusqu'à ce que la ligne confirme
+                return (
+                  <div key={z.dir + z.num} className="flex items-center justify-between gap-2 px-1 text-white font-sans">
+                    <FitLine max={fs(11)} min={9} className="flex-1">
+                      <span className="text-white/60">{ahead ? "↗ devant" : "↘ derrière"}</span> P{z.pos} #{z.num} {z.team}
+                    </FitLine>
+                    <span
+                      className="rounded px-1.5 font-black uppercase whitespace-nowrap"
+                      style={{ fontSize: fs(10), backgroundColor: sw === "passedUs" ? "#ff1f1f" : "#e5e5e5", color: sw === "passedUs" ? "#fff" : "#000" }}
+                    >
+                      {sw === "passedUs" ? "↑ devant sur piste" : "↓ derrière sur piste"}
+                    </span>
+                  </div>
+                );
+              }
               if (z.kind === "closing") right = fmtCountdown(z.remainingMs);
               else if (z.kind === "lapped") right = `à ${z.gapLaps} tr`;
               else if (z.kind === "away") right = z.farOff ? "–" : "s'éloigne";
@@ -1056,8 +1074,8 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", 
                   // devant : seulement les équipages plus lents que nous (rythme des 5 derniers tours) ;
                   // derrière : les 3 voisins, plus tout équipage plus rapide qui peut nous dépasser
                   const genRows = [
-                    ...zones.ahead.filter((z) => z.kind === "closing"),
-                    ...zones.behind.filter((z, i) => i < 3 || z.kind === "closing"),
+                    ...zones.ahead.filter((z) => z.kind === "closing" || swaps[z.num]),
+                    ...zones.behind.filter((z, i) => i < 3 || z.kind === "closing" || swaps[z.num]),
                   ];
                   const shown = genRows.slice(0, 5);
                   const rest = genRows.slice(5);

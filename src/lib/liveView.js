@@ -345,6 +345,32 @@ export function duelEstimatesTrack(cars, myNum, remainingMs, store = paceStore, 
   return { threats, chases, onTrack: true };
 }
 
+// Voitures dont l'ordre SUR LA PISTE contredit le classement officiel (mis à jour seulement à la ligne) :
+//   "passedUs"   : classée derrière nous, mais déjà devant nous sur la piste (elle nous a dépassés depuis la ligne)
+//   "passedByUs" : classée devant nous, mais déjà derrière nous sur la piste (nous l'avons dépassée depuis la ligne)
+// Seules les voitures du même tour que nous (écart de piste < 1/2 tour) sont concernées : une voiture à un tour n'est pas un dépassement.
+export function trackSwaps(cars, myNum, myPos, nowMs, store = paceStore, windowMs = 60000) {
+  const out = {};
+  const me = cars && cars[myNum];
+  if (!me || myPos == null || nowMs == null) return out;
+  const myPace = paceOf(myNum, me, store);
+  if (!myPace || OFF_TRACK.test(me.state || "")) return out;
+  const myProg = trackProgress(myNum, me, me, nowMs, store);
+  if (myProg == null) return out;
+  for (const num of Object.keys(cars)) {
+    if (num === myNum) continue;
+    const c = cars[num];
+    if (!c || c.pos == null || OFF_TRACK.test(c.state || "")) continue;
+    const pr = trackProgress(num, c, me, nowMs, store);
+    if (pr == null) continue;
+    const raw = pr - myProg; // > 0 : devant nous sur la piste
+    if (Math.abs(raw) >= 0.5 || Math.abs(raw) * myPace > windowMs) continue;
+    if (raw > 0 && c.pos > myPos) out[num] = "passedUs";
+    else if (raw < 0 && c.pos < myPos) out[num] = "passedByUs";
+  }
+  return out;
+}
+
 // ---------- Compte à rebours ----------
 // L'heure estimée du contact (etaAt) est recalée chaque fois que l'écart change (franchissement d'un intermédiaire / de la ligne),
 // puis le compte à rebours s'écoule seconde par seconde jusqu'à la prochaine mise à jour.
