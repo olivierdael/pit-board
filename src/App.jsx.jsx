@@ -1,5 +1,28 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from "react";
 import { supabase } from "./lib/supabase";
+import { fetchLiveTiming, parseLiveTiming, normalizeCarNumber } from "./lib/risLive";
+import { RIS_ORIGIN, buildBookmarklet, readRisMessage } from "./lib/risBridge";
+import {
+  MAX_DRIVERS,
+  MIN_DRIVERS,
+  getCfg,
+  driverName,
+  addDriver,
+  updateDriver,
+  moveDriver,
+  resolveRelay,
+  setRelayDriver,
+  freezeRelay,
+  driverHasRelays,
+  driverTotals,
+  resetDriverRelays,
+  setEndLap,
+  endLapOf,
+  relayLapsFromEnds,
+  observeLap,
+  mergeBest,
+} from "./lib/drivers";
+import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, classDuels } from "./lib/liveView";
 import {
   Flag,
   Plus,
@@ -267,74 +290,54 @@ function playBeep(ref) {
   } catch (e) {}
 }
 
-// annonce vocale électronique, voix masculine à accent belge si disponible, précédée d'un bip
-function speakAnnouncement(audioRef, numero, seconds, isReminder) {
+// squelette commun des annonces vocales : carillon, puis (après 400 ms) voix choisie et lecture
+// build() -> utterance ; pick(utter, voices) choisit la voix / la langue
+function speakJob(chime, build, pick) {
   if (typeof window === "undefined" || !window.speechSynthesis) return;
   queueSpeechJob(
     () =>
       new Promise((resolve) => {
         try {
-          playBeep(audioRef);
-
-          const delay = describeDelay(seconds);
-          const prefix = isReminder ? "Rappel." : "Attention.";
-          const text = `${prefix} La voiture numéro ${numero} va rentrer au stand ${delay}.`;
-          const utter = new SpeechSynthesisUtterance(text);
-          utter.rate = 0.92;
-          utter.pitch = 0.45; // voix grave, masculine et synthétique
+          chime();
+          const utter = build();
           utter.volume = 1;
-
-          const applyVoiceAndSpeak = () => {
-            const voices = window.speechSynthesis.getVoices();
-            const voice = pickMaleVoice(voices);
-            if (voice) utter.voice = voice;
-            // utilise l'accent belge si une voix fr-BE existe, sinon repli sur le français standard
-            utter.lang = hasBelgianVoice(voices) ? "fr-BE" : "fr-FR";
+          const go = () => {
+            pick(utter, window.speechSynthesis.getVoices());
             speakWithSafety(utter, resolve);
           };
-
-          // laisse le carillon se terminer avant de parler
-          setTimeout(() => waitForVoicesThenRun(applyVoiceAndSpeak), 400);
+          setTimeout(() => waitForVoicesThenRun(go), 400);
         } catch (e) {
           resolve();
         }
       })
   );
 }
+// voix grave "annonce de gare" (accent belge si une voix fr-BE existe)
+function pickStationVoice(utter, voices) {
+  const voice = pickMaleVoice(voices);
+  if (voice) utter.voice = voice;
+  utter.lang = hasBelgianVoice(voices) ? "fr-BE" : "fr-FR";
+}
+function stationUtter(text) {
+  const u = new SpeechSynthesisUtterance(text);
+  u.rate = 0.92;
+  u.pitch = 0.45; // voix grave, masculine et synthétique
+  return u;
+}
+
+// annonce vocale électronique, voix masculine à accent belge si disponible, précédée d'un bip
+function speakAnnouncement(audioRef, numero, seconds, isReminder) {
+  const prefix = isReminder ? "Rappel." : "Attention.";
+  const text = `${prefix} La voiture numéro ${numero} va rentrer au stand ${describeDelay(seconds)}.`;
+  speakJob(() => playBeep(audioRef), () => stationUtter(text), pickStationVoice);
+}
 
 // annonce vocale (voix homme) quand un manager clique sur un onglet de point de piste ("Entrée", "Source", "Kemmel", etc.)
 function speakTrackPoint(audioRef, numero, pointName, sec) {
-  if (typeof window === "undefined" || !window.speechSynthesis) return;
-  queueSpeechJob(
-    () =>
-      new Promise((resolve) => {
-        try {
-          playBeep(audioRef);
-
-          const timePart =
-            typeof sec === "number" && sec > 0
-              ? ` Le temps estimé avant l'entrée au stand est de ${describeDuration(sec)}.`
-              : "";
-          const text = `Attention. La voiture numéro ${numero} est à ${pointName}.${timePart}`;
-          const utter = new SpeechSynthesisUtterance(text);
-          utter.rate = 0.92;
-          utter.pitch = 0.45; // voix grave, masculine et synthétique
-          utter.volume = 1;
-
-          const applyVoiceAndSpeak = () => {
-            const voices = window.speechSynthesis.getVoices();
-            const voice = pickMaleVoice(voices);
-            if (voice) utter.voice = voice;
-            utter.lang = hasBelgianVoice(voices) ? "fr-BE" : "fr-FR";
-            speakWithSafety(utter, resolve);
-          };
-
-          setTimeout(() => waitForVoicesThenRun(applyVoiceAndSpeak), 400);
-        } catch (e) {
-          resolve();
-        }
-      })
-  );
+  const timePart =
+    typeof sec === "number" && sec > 0 ? ` Le temps estimé avant l'entrée au stand est de ${describeDuration(sec)}.` : "";
+  const text = `Attention. La voiture numéro ${numero} est à ${pointName}.${timePart}`;
+  speakJob(() => playBeep(audioRef), () => stationUtter(text), pickStationVoice);
 }
 
 // ne retombe JAMAIS sur une voix d'une autre langue : mieux vaut laisser le navigateur
@@ -408,69 +411,42 @@ function playAlertSiren(ref) {
 
 // alerte "full course yellow" : sirène puis annonce vocale rapide et agressive
 function speakYellowAlert(audioRef, text) {
-  if (typeof window === "undefined" || !window.speechSynthesis) return;
-  queueSpeechJob(
-    () =>
-      new Promise((resolve) => {
-        try {
-          playAlertSiren(audioRef);
-
-          const utter = new SpeechSynthesisUtterance(text);
-          utter.rate = 1.0; // débit normal, posé, pas précipité
-          utter.pitch = 0.95; // voix d'homme naturelle, quasi neutre, très intelligible
-          utter.volume = 1;
-
-          const applyVoiceAndSpeak = () => {
-            const voices = window.speechSynthesis.getVoices();
-            const voice = pickVoiceForLangStrict(voices, "en", false);
-            // n'assigne une voix que si elle est vraiment anglaise ; sinon on laisse le
-            // navigateur choisir via utter.lang plutôt que de forcer une voix française
-            // qui prononcerait mal le texte anglais
-            if (voice) utter.voice = voice;
-            utter.lang = "en-US";
-            speakWithSafety(utter, resolve);
-          };
-
-          setTimeout(() => waitForVoicesThenRun(applyVoiceAndSpeak), 400);
-        } catch (e) {
-          resolve();
-        }
-      })
+  speakJob(
+    () => playAlertSiren(audioRef),
+    () => {
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = 1.0; // débit normal, posé
+      u.pitch = 0.95;
+      return u;
+    },
+    (utter, voices) => {
+      // n'assigne une voix que si elle est vraiment anglaise (sinon le navigateur choisit via utter.lang)
+      const voice = pickVoiceForLangStrict(voices, "en", false);
+      if (voice) utter.voice = voice;
+      utter.lang = "en-US";
+    }
   );
 }
 
 // lecture d'un message d'équipe : bip de début puis voix agréable et naturelle
 function speakMessage(audioRef, numero, managerName, text) {
-  if (typeof window === "undefined" || !window.speechSynthesis) return;
-  queueSpeechJob(
-    () =>
-      new Promise((resolve) => {
-        try {
-          playBeep(audioRef);
-
-          const who = managerName ? `de ${managerName}, ` : "";
-          const spoken = `Message ${who}pour la voiture numéro ${numero}. ${text}`;
-          const utter = new SpeechSynthesisUtterance(spoken);
-          utter.rate = 1.0;
-          utter.pitch = 1.05; // ton naturel et chaleureux, pas de voix électronique
-          utter.volume = 1;
-          utter.lang = "fr-FR";
-
-          const applyVoiceAndSpeak = () => {
-            const voices = window.speechSynthesis.getVoices();
-            const frVoices = voices.filter((v) => v.lang && v.lang.toLowerCase().startsWith("fr"));
-            if (frVoices.length > 0) {
-              utter.voice = frVoices[0];
-              utter.lang = frVoices[0].lang;
-            }
-            speakWithSafety(utter, resolve);
-          };
-
-          setTimeout(() => waitForVoicesThenRun(applyVoiceAndSpeak), 400);
-        } catch (e) {
-          resolve();
-        }
-      })
+  const who = managerName ? `de ${managerName}, ` : "";
+  speakJob(
+    () => playBeep(audioRef),
+    () => {
+      const u = new SpeechSynthesisUtterance(`Message ${who}pour la voiture numéro ${numero}. ${text}`);
+      u.rate = 1.0;
+      u.pitch = 1.05; // ton naturel et chaleureux
+      u.lang = "fr-FR";
+      return u;
+    },
+    (utter, voices) => {
+      const fr = voices.filter((v) => v.lang && v.lang.toLowerCase().startsWith("fr"));
+      if (fr.length > 0) {
+        utter.voice = fr[0];
+        utter.lang = fr[0].lang;
+      }
+    }
   );
 }
 
@@ -558,6 +534,698 @@ function techRowToApp(r) {
   };
 }
 
+// -- relais : conversions et fusion (clé naturelle d'un relais = numéro de voiture + n) --
+// les colonnes de durée de Supabase sont des entiers : une valeur à virgule (ex. 123.456)
+// est refusée par la base, il faut donc toujours arrondir avant d'écrire.
+function toInt(v) {
+  const n = Math.round(Number(v));
+  return Number.isFinite(n) ? n : 0;
+}
+function toIntOrNull(v) {
+  if (v === "" || v == null) return null;
+  const n = Math.round(Number(v));
+  return Number.isFinite(n) ? n : null;
+}
+function stintRowToApp(r) {
+  return {
+    n: r.n,
+    durationSec: r.duration_sec,
+    laps: r.laps ?? "",
+    vertSec: r.vert_sec || 0,
+    jauneSec: r.jaune_sec || 0,
+    idleSec: r.idle_sec || 0,
+    refueled: !!r.refueled,
+    _dbId: r.id,
+  };
+}
+// fusionne une ligne reçue de Supabase dans le journal local : si le relais existe déjà
+// (ajouté localement avant l'écho Realtime), on le met à jour au lieu de le dupliquer
+function mergeStintEntry(log, entry) {
+  const idx = log.findIndex((x) => x.n === entry.n);
+  if (idx === -1) return [...log, entry].sort((a, b) => a.n - b.n);
+  const local = log[idx];
+  const merged = {
+    ...entry,
+    idleSec: Math.max(entry.idleSec || 0, local.idleSec || 0),
+    laps: entry.laps !== "" ? entry.laps : local.laps,
+  };
+  return log.map((x, i) => (i === idx ? merged : x));
+}
+
+// champ texte qui n'enregistre qu'en quittant le champ (ou sur Entrée) : pas d'aller-retour
+// avec les autres postes pendant la frappe
+// Vidéo MyRacesLive d'une voiture : lecteur intégré (si la plateforme l'autorise) + lien de secours
+function CarVideo({ url, always }) {
+  const [open0, setOpen] = useState(false);
+  const open = always || open0;
+  const clean = typeof url === "string" ? url.trim() : "";
+  if (!/^https?:\/\//i.test(clean)) return null;
+  // liens YouTube (watch, youtu.be, live, embed) -> lecteur intégré ; sinon l'adresse telle quelle
+  let src = clean;
+  const yt = clean.match(/(?:youtube\.com\/(?:watch\?(?:.*&)?v=|live\/|embed\/|shorts\/)|youtu\.be\/)([\w-]{11})/i);
+  if (yt) src = "https://www.youtube.com/embed/" + yt[1] + "?autoplay=1&mute=1";
+  return (
+    <div className="pt-1 border-t border-white/10">
+      <div className="flex items-center gap-2">
+        {!always && (
+          <button
+            onClick={() => setOpen((o) => !o)}
+            className="px-2 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-[11px] font-bold uppercase tracking-wide"
+          >
+            {open ? "Masquer la vidéo" : "▶ Vidéo live"}
+          </button>
+        )}
+        <a
+          href={clean}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="px-2 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-[11px] font-bold uppercase tracking-wide"
+        >
+          Ouvrir dans un onglet ↗
+        </a>
+      </div>
+      {open && (
+        <div className="mt-2">
+          <div className="relative w-full" style={{ paddingTop: "56.25%" }}>
+            <iframe
+              src={src}
+              title="Vidéo MyRacesLive"
+              className="absolute inset-0 w-full h-full rounded bg-black"
+              allow="autoplay; fullscreen; picture-in-picture"
+              allowFullScreen
+              referrerPolicy="strict-origin-when-cross-origin"
+            />
+          </div>
+          <div className="text-[10px] text-white/50 mt-1">
+            Si l'image reste noire, la plateforme refuse l'intégration : utilisez « Ouvrir dans un onglet ».
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Fenêtre (team manager) : la fenêtre s'ouvre en grand par-dessus l'écran ; pour les autres rôles le panneau reste affiché en place.
+function PanelHost({ modal, open, onClose, title, children }) {
+  if (!modal) return children;
+  if (!open) return null;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/75 p-3 sm:p-6"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="w-full max-w-4xl my-auto rounded-xl bg-neutral-900 border border-white/25 shadow-2xl">
+        <div className="flex items-center justify-between px-4 py-2 border-b border-white/10">
+          <div className="text-white font-black uppercase tracking-wide text-sm">{title}</div>
+          <button onClick={onClose} className="text-white/70 hover:text-white" title="Fermer">
+            <X size={20} />
+          </button>
+        </div>
+        <div className="p-3 [&>div]:mb-0">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+// temps de roulage et meilleurs temps de tous les pilotes d'une voiture (menu déroulant côté team manager)
+function DriversTimes({ ds, hasLive }) {
+  return (
+    <div className="text-[10px] text-white/70 flex flex-col gap-1">
+      {ds.cfg.list.map((p) => {
+        const t = ds.totals[p.id];
+        const isCur = ds.curDriver && ds.curDriver.id === p.id;
+        const bst = ds.cfg.best[p.id];
+        return (
+          <div key={p.id} className="flex flex-col">
+            <div className={`flex items-center justify-between gap-2 font-mono ${isCur ? "text-white font-bold" : ""} ${p.absent ? "opacity-50" : ""}`}>
+              <span className="truncate font-sans">
+                {driverName(p) || "Pilote sans nom"}
+                {p.absent ? " (indisp.)" : ""}
+              </span>
+              <span className="whitespace-nowrap">
+                {fmtTimeHMS(t.total)}{" "}
+                <span className="text-white/50">
+                  🟢{fmtTimeHMS(t.vert)} 🟡{fmtTimeHMS(t.jaune)} · {t.relays} rel. · {t.laps} tr
+                </span>
+              </span>
+            </div>
+            {hasLive && (
+              <div className="font-mono text-[9px] pl-2" style={{ color: "#4da3ff" }}>
+                {bst && (bst.lap || bst.s1 || bst.s2 || bst.s3)
+                  ? `Meilleur tour ${fmtMs(bst.lap)} · S1 ${fmtMs(bst.s1)} · S2 ${fmtMs(bst.s2)} · S3 ${fmtMs(bst.s3)}`
+                  : <span className="text-white/35">Meilleurs temps : pas encore enregistrés</span>}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function DraftInput({ value, onCommit, placeholder, className, disabled }) {
+  const [draft, setDraft] = useState(value || "");
+  const focusedRef = useRef(false);
+  useEffect(() => {
+    if (!focusedRef.current) setDraft(value || "");
+  }, [value]);
+  return (
+    <input
+      type="text"
+      value={draft}
+      placeholder={placeholder}
+      disabled={disabled}
+      className={className}
+      onFocus={() => (focusedRef.current = true)}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => {
+        focusedRef.current = false;
+        if (draft !== (value || "")) onCommit(draft);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") e.currentTarget.blur();
+      }}
+    />
+  );
+}
+
+// bloc "live" d'une tuile : temps de course, tour, intermédiaires, puis (si showTable) le classement
+// avec les 3 voitures devant et les 3 derrière, leurs intermédiaires et leur écart avec nous
+function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", big = false }) {
+  const [openZ, setOpenZ] = useState({}); // menus déroulants des alertes (devant / derrière / piste)
+  if (!live) return null;
+  const clock = clockNow(info, now);
+  const nb = showTable && part !== "main" && part !== "alerts" ? neighborsOf(info.cars, num, 3) : null;
+  // estimation des dépassements : voisins calculés même si le tableau est replié
+  updatePace(info.cars);
+  const remMs = clock && clock.remainingSec != null ? clock.remainingSec * 1000 : null;
+  // priorité : toutes les voitures proches SUR LA PISTE (heures de passage du flux) ; repli : voisins du classement
+  const duel = duelEstimatesTrack(info.cars, num, remMs) || duelEstimates(nb || neighborsOf(info.cars, num, 3), remMs);
+  const prio = duel && duel.onTrack ? prioritizedDuels(duel, now) : [];
+  const zones = classDuels(neighborsOf(info.cars, num, 3), remMs, now);
+  // couleurs d'une alerte : rouge/orange = elle va nous dépasser ; jaune = nous allons la dépasser
+  const alertStyle = (threat, level, remainingMs) => {
+    const hot = level === "high" || remainingMs <= 120000;
+    if (threat)
+      return { hot, bg: hot ? "#ff1f1f" : level === "mid" ? "#ff8a00" : "rgba(255,138,0,0.18)", fg: hot ? "#fff" : level === "mid" ? "#000" : "#ffb347" };
+    return { hot, bg: hot || level === "mid" ? "#ffe600" : "rgba(255,230,0,0.15)", fg: hot || level === "mid" ? "#000" : "#ffe600" };
+  };
+  const K = big ? 1.3 : 1; // agrandissement des alertes quand il y a de la place
+  const fs = (n) => Math.round(n * K);
+  const lapsTxt = (l) => (l < 10 ? l.toFixed(1) : String(Math.round(l)));
+  const cd = (ms, size) => (
+    <span className="font-mono tabular-nums font-black" style={{ fontSize: size }}>
+      {ms <= 1000 ? "MAINTENANT" : fmtCountdown(ms)}
+    </span>
+  );
+  const zoneRow = (z) => {
+    const closing = z.kind === "closing";
+    const ahead = z.dir === "ahead";
+    const st = closing ? alertStyle(!ahead, z.level, z.remainingMs) : { hot: false, bg: "rgba(255,255,255,0.06)", fg: "rgba(255,255,255,0.75)" };
+    let detail;
+    if (z.kind === "lapped") detail = `à ${z.gapLaps} tour${z.gapLaps > 1 ? "s" : ""} : pas d'estimation`;
+    else if (z.kind === "unknown") detail = "pas assez de données";
+    else if (z.kind === "away")
+      detail = `${fmtGapMs(z.gapMs)} · ${ahead ? "s'éloigne" : "on s'éloigne"} (${(Math.abs(z.diffMs) / 1000).toFixed(1)} s/tour)${z.farOff ? " · trop lointain" : ""}`;
+    else detail = `${fmtGapMs(z.gapMs)} · ${ahead ? "+" : "gagne "}${(z.diffMs / 1000).toFixed(1)} s/tour · ~${lapsTxt(z.laps)} tr`;
+    return (
+      <div
+        key={z.dir + z.num}
+        className={`font-sans leading-tight rounded px-2 py-1 flex items-center justify-between gap-2 ${closing ? "font-black" : "font-semibold"}`}
+        style={{ backgroundColor: st.bg, color: st.fg, fontSize: fs(11) }}
+      >
+        <span>
+          {closing ? (ahead ? (st.hot ? "⚠ À DÉPASSER : " : "↗ À dépasser : ") : st.hot ? "⚠ VA NOUS DÉPASSER : " : "↘ Va nous dépasser : ") : ""}P{z.pos} #{z.num} {z.team}
+          <span className="block font-bold" style={{ fontSize: fs(10) }}>{detail}</span>
+        </span>
+        {closing && cd(z.remainingMs, 16)}
+      </div>
+    );
+  };
+  const trackRow = (d) => {
+    const threat = d.dir === "threat";
+    const st = alertStyle(threat, d.level, d.remainingMs);
+    return (
+      <div
+        key={d.dir + d.num}
+        className="font-sans font-black leading-tight rounded px-2 py-1 flex items-center justify-between gap-2"
+        style={{ backgroundColor: st.bg, color: st.fg, fontSize: fs(11) }}
+      >
+        <span>
+          {threat ? (st.hot ? "⚠ ON VA NOUS DÉPASSER : " : "↘ Va nous dépasser : ") : st.hot ? "⚠ À DÉPASSER : " : "↗ À dépasser : "}
+          {d.pos ? `P${d.pos} ` : ""}#{d.num} {d.team}
+          <span className="block font-bold" style={{ fontSize: fs(10) }}>
+            sur la piste {fmtGapMs(d.gapMs)} · {threat ? "gagne " : "+"}
+            {(d.closingMs / 1000).toFixed(1)} s/tour · ~{lapsTxt(d.laps)} tr
+          </span>
+        </span>
+        {cd(d.remainingMs, fs(16))}
+      </div>
+    );
+  };
+  // groupes d'alertes (menus déroulants) ; "soonest" = alerte la plus proche du groupe
+  const groups = [
+    {
+      key: "ahead",
+      title: "Devant nous au général",
+      rows: zones ? zones.ahead : [],
+      closing: zones ? zones.ahead.filter((z) => z.kind === "closing") : [],
+      render: zoneRow,
+      threat: false,
+    },
+    {
+      key: "behind",
+      title: "Derrière nous au général",
+      rows: zones ? zones.behind : [],
+      closing: zones ? zones.behind.filter((z) => z.kind === "closing") : [],
+      render: zoneRow,
+      threat: true,
+    },
+    { key: "track", title: "Trafic sur la piste", rows: prio, closing: prio, render: trackRow, threat: null },
+  ].filter((g) => g.rows.length > 0);
+  const BLUE = "#4da3ff"; // meilleurs temps et intermédiaires
+  const GREEN = "#39ff14"; // notre voiture
+  const isBest = (v, b) => v != null && b != null && v <= b;
+  const sec = (v, b) => (
+    <span style={isBest(v, b) ? { color: BLUE, fontWeight: 800 } : undefined} className={isBest(v, b) ? "" : "text-white"}>
+      {fmtMs(v)}
+    </span>
+  );
+  const gapTxt = (r) =>
+    !r.gap ? "–" : r.gap.laps ? `${r.gap.laps} tr` : fmtGapMs(r.gap.ms);
+  const rowCls = "grid items-center gap-x-1.5 font-mono text-[10px]";
+  const cols = { gridTemplateColumns: "2.2rem 1fr 4rem 2.6rem 2.6rem 2.6rem 3.4rem" };
+  const line = (r, me) => (
+    <div
+      key={r.num}
+      className={`${rowCls} px-1 py-0.5 ${me ? "rounded font-black" : "text-white/80"}`}
+      style={me ? { ...cols, color: GREEN, backgroundColor: "rgba(57,255,20,0.14)", boxShadow: `inset 0 0 0 1px ${GREEN}` } : cols}
+    >
+      <span>P{r.pos}</span>
+      <span className="truncate font-sans">
+        #{r.num} {r.team}
+      </span>
+      <span style={isBest(r.last, r.best) ? { color: BLUE, fontWeight: 800 } : undefined}>{fmtMs(r.last)}</span>
+      <span style={isBest(r.s1, r.s1b) ? { color: BLUE, fontWeight: 800 } : undefined}>{fmtSec1(r.s1)}</span>
+      <span style={isBest(r.s2, r.s2b) ? { color: BLUE, fontWeight: 800 } : undefined}>{fmtSec1(r.s2)}</span>
+      <span style={isBest(r.s3, r.s3b) ? { color: BLUE, fontWeight: 800 } : undefined}>{fmtSec1(r.s3)}</span>
+      <span className="text-right">
+        {me ? "" : (r.ahead ? "▲ " : "▼ ") + gapTxt(r)}
+      </span>
+    </div>
+  );
+  const tableEl = nb ? (
+        <div className="flex flex-col gap-0.5 pt-1 border-t border-white/10">
+          <div className={`${rowCls} px-1 text-white/40 uppercase text-[9px]`} style={cols}>
+            <span>Pos</span>
+            <span>Voiture</span>
+            <span>Tour</span>
+            <span>S1</span>
+            <span>S2</span>
+            <span>S3</span>
+            <span className="text-right">Écart</span>
+          </div>
+          {nb.above.map((r) => line(r, false))}
+          {line({ ...nb.me, num, ahead: false }, true)}
+          {nb.below.map((r) => line(r, false))}
+        </div>
+  ) : null;
+  if (part === "table")
+    return nb ? (
+      <div className="rounded bg-black/40 px-2 py-1.5 flex flex-col gap-1 text-[10px] font-mono text-white/80">
+        <div className="text-[10px] font-black uppercase tracking-wide text-white/60 font-sans">Classement autour de nous</div>
+        {tableEl}
+      </div>
+    ) : null;
+  return (
+    <div className="rounded bg-black/40 px-2 py-1.5 flex flex-col gap-1 text-[10px] font-mono text-white/80">
+      {part !== "alerts" && (
+        <>
+      {clock && (
+        <div className="flex items-center justify-between gap-2">
+          <span>
+            ⏱ Écoulé <b className="text-white">{clock.elapsedSec != null ? fmtTimeHMS(clock.elapsedSec) : "–"}</b>
+          </span>
+          <span>
+            Restant <b className="text-white">{clock.remainingSec != null ? fmtTimeHMS(clock.remainingSec) : "–"}</b>
+          </span>
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
+        <span>
+          P<b className="text-white">{live.pos || "-"}</b>
+          {nb ? `/${nb.total}` : ""}
+        </span>
+        {live.laps != null && (
+          <span>
+            Tour <b className="text-white">{live.laps}</b>
+          </span>
+        )}
+        <span>Dernier {fmtMs(live.last)}</span>
+        <span>
+          Meilleur <b style={{ color: BLUE }}>{fmtMs(live.best)}</b>
+        </span>
+        {live.pits != null && <span>Arrêts {live.pits}</span>}
+      </div>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
+        <span>
+          S1 {sec(live.s1, live.s1b)} <span style={{ color: BLUE }}>({fmtMs(live.s1b)})</span>
+        </span>
+        <span>
+          S2 {sec(live.s2, live.s2b)} <span style={{ color: BLUE }}>({fmtMs(live.s2b)})</span>
+        </span>
+        <span>
+          S3 {sec(live.s3, live.s3b)} <span style={{ color: BLUE }}>({fmtMs(live.s3b)})</span>
+        </span>
+      </div>
+      {driverBest && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 border-t border-white/10 pt-1">
+          <span className="text-white">Pilote {driverBest.name || "?"} :</span>
+          {driverBest.best && (driverBest.best.lap || driverBest.best.s1 || driverBest.best.s2 || driverBest.best.s3) ? (
+            <>
+              <span>
+                Meilleur tour <b style={{ color: BLUE }}>{fmtMs(driverBest.best.lap)}</b>
+              </span>
+              <span>
+                S1 <b style={{ color: BLUE }}>{fmtMs(driverBest.best.s1)}</b>
+              </span>
+              <span>
+                S2 <b style={{ color: BLUE }}>{fmtMs(driverBest.best.s2)}</b>
+              </span>
+              <span>
+                S3 <b style={{ color: BLUE }}>{fmtMs(driverBest.best.s3)}</b>
+              </span>
+            </>
+          ) : (
+            <span className="text-white/40">pas encore de temps enregistré</span>
+          )}
+        </div>
+      )}
+        </>
+      )}
+      {part !== "table" && part !== "stats" && (
+        <div className="flex flex-col gap-2 pt-1 border-t border-white/10">
+          {(() => {
+            // un rectangle par famille d'estimations : piste (bleu) puis classement général (violet)
+            const boxes = [
+              { key: "track", title: "🏁 Trafic sur la piste", sub: "voitures proches de nous sur le circuit, tous rangs", color: "#38bdf8", bg: "rgba(14,165,233,0.12)", keys: ["track"] },
+              { key: "gen", title: "🏆 Dépassements au classement général", sub: "les 3 devant et les 3 derrière nous", color: "#c084fc", bg: "rgba(168,85,247,0.14)", keys: ["ahead", "behind"] },
+            ];
+            return boxes.map((box) => {
+              const gs = groups.filter((g) => box.keys.includes(g.key));
+              const urg = gs
+                .flatMap((g) =>
+                  g.closing.map((r) => ({
+                    r,
+                    threat: g.key === "track" ? r.dir === "threat" : g.threat,
+                    where: g.key === "track" ? "piste" : g.key === "ahead" ? "devant" : "derrière",
+                  }))
+                )
+                .sort((a, b) => a.r.remainingMs - b.r.remainingMs)[0];
+              return (
+                <div key={box.key} className="rounded-lg p-1.5 flex flex-col gap-1" style={{ backgroundColor: box.bg, border: `2px solid ${box.color}` }}>
+                  <div className="flex flex-col font-sans leading-tight">
+                    <span className="font-black uppercase tracking-wide" style={{ color: box.color, fontSize: fs(12) }}>{box.title}</span>
+                    <span className="text-white/50" style={{ fontSize: fs(10) }}>{box.sub}</span>
+                  </div>
+                  {urg ? (
+                    (() => {
+                      const st = alertStyle(urg.threat, urg.r.level, urg.r.remainingMs);
+                      return (
+                        <div
+                          className="font-sans font-black leading-tight rounded px-2 py-1.5 flex items-center justify-between gap-2"
+                          style={{ backgroundColor: st.bg, color: st.fg, fontSize: fs(14) }}
+                        >
+                          <span>
+                            {urg.threat ? (st.hot ? "⚠ ON VA NOUS DÉPASSER" : "↘ Va nous dépasser") : st.hot ? "⚠ NOUS DÉPASSONS" : "↗ Nous allons dépasser"}
+                            <span className="block font-bold" style={{ fontSize: fs(11) }}>
+                              {urg.r.pos ? `P${urg.r.pos} ` : ""}#{urg.r.num} {urg.r.team} · {urg.where}
+                            </span>
+                          </span>
+                          {cd(urg.r.remainingMs, fs(30))}
+                        </div>
+                      );
+                    })()
+                  ) : (
+                    <div className="rounded px-2 py-1 bg-white/5 text-white/60 font-sans font-semibold" style={{ fontSize: fs(11) }}>
+                      Aucun dépassement prévu pour le moment
+                    </div>
+                  )}
+                  {gs.map((g) => {
+                    const open = !!openZ[g.key];
+                    const soon = [...g.closing].sort((a, b) => a.remainingMs - b.remainingMs)[0];
+                    const cst = soon ? alertStyle(g.key === "track" ? soon.dir === "threat" : g.threat, soon.level, soon.remainingMs) : null;
+                    return (
+                      <div key={g.key} className="flex flex-col gap-1">
+                        <button
+                          type="button"
+                          onClick={() => setOpenZ((o) => ({ ...o, [g.key]: !o[g.key] }))}
+                          className="flex items-center justify-between gap-2 rounded bg-black/30 hover:bg-black/45 px-2 py-1 text-left"
+                        >
+                          <span className="font-black uppercase tracking-wide text-white/80" style={{ fontSize: fs(10) }}>
+                            {open ? "▾" : "▸"} {g.title} ({g.rows.length})
+                          </span>
+                          {soon ? (
+                            <span className="rounded px-1.5 py-0.5 flex items-center gap-1.5" style={{ backgroundColor: cst.bg, color: cst.fg, fontSize: fs(10) }}>
+                              <b className="font-sans">#{soon.num}</b>
+                              {cd(soon.remainingMs, fs(12))}
+                            </span>
+                          ) : (
+                            <span className="text-white/40" style={{ fontSize: fs(10) }}>rien à signaler</span>
+                          )}
+                        </button>
+                        {open && (
+                          <div className="flex flex-col gap-1">
+                            {g.rows.slice(0, 6).map(g.render)}
+                            {g.rows.length > 6 && (
+                              <div className="text-white/50 font-sans" style={{ fontSize: fs(10) }}>
+                                + {g.rows.length - 6} autres voitures plus lointaines
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            });
+          })()}
+        </div>
+      )}
+      {nb && part === "all" && tableEl}
+    </div>
+  );
+}
+
+// bandeau de la tuile : pilote du relais, confirmation, temps de roulage cumulé (vert / jaune)
+function DriverStrip({ ds, canEdit, onSet }) {
+  const [changing, setChanging] = useState(false);
+  const { cfg, n, onTrack, cur, curDriver, prevId, totals } = ds;
+  const tot = curDriver ? totals[curDriver.id] : null;
+  const choices = cfg.list.filter((d) => !d.absent || d.id === cur.id);
+  const btn = "px-2 py-0.5 rounded font-bold text-[10px]";
+  return (
+    <div className="rounded bg-white/5 px-2 py-1.5 flex flex-col gap-1 text-[11px]">
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-black text-white truncate">
+          {curDriver ? driverName(curDriver) || "Pilote sans nom" : "Aucun pilote disponible"}
+        </span>
+        <span className="text-white/50 text-[10px] whitespace-nowrap">
+          Relais {n} {onTrack ? "en cours" : "à venir"}
+        </span>
+      </div>
+      {tot && (
+        <div className="font-mono text-white/80">
+          Roulage {fmtTimeHMS(tot.total)}{" "}
+          <span className="text-white/50">
+            🟢{fmtTimeHMS(tot.vert)} 🟡{fmtTimeHMS(tot.jaune)}
+            {tot.rouge >= 5 && <> 🔴{fmtTimeHMS(tot.rouge)}</>}
+          </span>
+          <span className="text-white/40"> · {tot.relays} relais</span>
+        </div>
+      )}
+      {curDriver && !changing && (
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {cur.confirmed ? (
+            <span className="text-green-400 font-bold">✓ Confirmé</span>
+          ) : (
+            <span className="text-amber-400 font-bold">Pilote prévu, à confirmer</span>
+          )}
+          {canEdit && !cur.confirmed && (
+            <button
+              type="button"
+              onClick={() => onSet(n, cur.id)}
+              className={`${btn} bg-green-600 text-white`}
+            >
+              Confirmer
+            </button>
+          )}
+          {canEdit && (
+            <button type="button" onClick={() => setChanging(true)} className={`${btn} bg-white/15 text-white`}>
+              Changer
+            </button>
+          )}
+        </div>
+      )}
+      {changing && (
+        <div className="flex items-center gap-1.5">
+          <select
+            autoFocus
+            value=""
+            onChange={(e) => {
+              if (e.target.value) onSet(n, e.target.value);
+              setChanging(false);
+            }}
+            className="flex-1 min-w-0 px-1 py-0.5 text-[11px] rounded bg-black/60 text-white border border-white/30"
+          >
+            <option value="">Pilote du relais {n}…</option>
+            {choices.map((d) => (
+              <option key={d.id} value={d.id}>
+                {driverName(d) || "Pilote sans nom"}
+                {d.id === prevId ? " (double relais)" : ""}
+              </option>
+            ))}
+          </select>
+          <button type="button" onClick={() => setChanging(false)} className={`${btn} bg-white/15 text-white`}>
+            Annuler
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// configuration des pilotes d'une voiture (carte "Configuration des voitures")
+function DriversEditor({ cfg, currentN, drivenN, canEdit, onChange }) {
+  const inputCls =
+    "min-w-0 flex-1 px-2 py-1 text-sm rounded bg-black/50 text-white placeholder-white/40 border border-white/20 focus:outline-none focus:border-white disabled:opacity-50";
+  const smallBtn =
+    "px-1.5 py-0.5 rounded text-[11px] font-bold bg-white/15 text-white disabled:opacity-30";
+  const relayNumbers = Array.from({ length: currentN }, (_, i) => currentN - i); // le plus récent en haut
+  return (
+    <div className="flex flex-col gap-1.5 border-t border-white/15 pt-1.5">
+      <div className="text-white/60 text-[10px] uppercase tracking-widest font-semibold">
+        Pilotes ({cfg.list.length}/{MAX_DRIVERS}) — dans l'ordre de passage
+      </div>
+      {cfg.list.length === 1 && (
+        <div className="text-amber-400 text-[10px]">Renseignez au moins {MIN_DRIVERS} pilotes.</div>
+      )}
+      {cfg.list.map((d, i) => {
+        const locked = driverHasRelays(cfg, drivenN, d.id);
+        return (
+          <div key={d.id} className="flex flex-col gap-1 rounded bg-white/5 p-1.5">
+            <div className="flex items-center gap-1">
+              <span className="text-white/50 text-[11px] w-4 text-right">{i + 1}</span>
+              <DraftInput
+                value={d.prenom}
+                placeholder="Prénom"
+                disabled={!canEdit}
+                className={inputCls}
+                onCommit={(v) => onChange(updateDriver(cfg, d.id, { prenom: v.trim() }))}
+              />
+              <DraftInput
+                value={d.nom}
+                placeholder="Nom"
+                disabled={!canEdit}
+                className={inputCls}
+                onCommit={(v) => onChange(updateDriver(cfg, d.id, { nom: v.trim() }))}
+              />
+            </div>
+            <div className="flex items-center gap-1.5 pl-5 flex-wrap">
+              <button
+                type="button"
+                disabled={!canEdit || i === 0}
+                onClick={() => onChange(moveDriver(cfg, d.id, -1))}
+                className={smallBtn}
+                title="Passer plus tôt dans l'ordre"
+              >
+                ↑
+              </button>
+              <button
+                type="button"
+                disabled={!canEdit || i === cfg.list.length - 1}
+                onClick={() => onChange(moveDriver(cfg, d.id, 1))}
+                className={smallBtn}
+                title="Passer plus tard dans l'ordre"
+              >
+                ↓
+              </button>
+              <label
+                className="flex items-center gap-1 text-white/70 text-[11px]"
+                title="Malade, blessé… : il est sauté dans l'ordre de passage"
+              >
+                <input
+                  type="checkbox"
+                  disabled={!canEdit}
+                  checked={!!d.absent}
+                  onChange={(e) => onChange(updateDriver(cfg, d.id, { absent: e.target.checked }))}
+                />
+                Indisponible
+              </label>
+              <button
+                type="button"
+                disabled={!canEdit || locked}
+                onClick={() => onChange({ ...cfg, list: cfg.list.filter((x) => x.id !== d.id) })}
+                className={`${smallBtn} ml-auto`}
+                title={locked ? "A déjà roulé : marquez-le indisponible plutôt que le supprimer" : "Supprimer ce pilote"}
+              >
+                <X size={11} />
+              </button>
+            </div>
+          </div>
+        );
+      })}
+      {cfg.list.length < MAX_DRIVERS && (
+        <button
+          type="button"
+          disabled={!canEdit}
+          onClick={() => onChange(addDriver(cfg))}
+          className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-bold bg-white/15 text-white self-start disabled:opacity-40"
+        >
+          <Plus size={11} /> Ajouter un pilote
+        </button>
+      )}
+      {cfg.list.length > 0 && (
+        <>
+          <div className="text-white/60 text-[10px] uppercase tracking-widest font-semibold mt-1">
+            Pilote de chaque relais
+          </div>
+          <div className="flex flex-col gap-1 max-h-40 overflow-y-auto pr-1">
+            {relayNumbers.map((n) => {
+              const r = resolveRelay(cfg, n);
+              return (
+                <div key={n} className="flex items-center gap-1.5 text-[11px] text-white/80">
+                  <span className="w-14 shrink-0">Relais {n}</span>
+                  <select
+                    disabled={!canEdit}
+                    value={r.id || ""}
+                    onChange={(e) => e.target.value && onChange(setRelayDriver(cfg, n, e.target.value))}
+                    className="flex-1 min-w-0 px-1 py-0.5 rounded bg-black/60 text-white border border-white/30 disabled:opacity-50"
+                  >
+                    {!r.id && <option value="">—</option>}
+                    {cfg.list.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {driverName(d) || "Pilote sans nom"}
+                        {d.absent ? " (indisp.)" : ""}
+                      </option>
+                    ))}
+                  </select>
+                  <span className={r.confirmed ? "text-green-400" : "text-amber-400"} title={r.confirmed ? "Confirmé" : "Prévu, à confirmer"}>
+                    {r.confirmed ? "✓" : "?"}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function PitBoard() {
   // code d'accès partagé (avant même le choix du rôle) : empêche qu'une personne tombe
   // sur le lien "par hasard" ou le partage sans réfléchir. Configuré via VITE_ACCESS_CODE
@@ -604,11 +1272,62 @@ export default function PitBoard() {
   const canEdit = role !== "readonly";
   const isAdmin = role === "admin";
 
+  // Team Manager : il choisit son numéro de voiture une fois par appareil et ne voit ensuite que
+  // sa voiture (comme pour le rôle, c'est un réglage d'interface, pas une vraie sécurité)
+  const [myCarId, setMyCarId] = useState(() => {
+    try {
+      const v = localStorage.getItem("pitboard_car");
+      return v ? Number(v) : null;
+    } catch (e) {
+      return null;
+    }
+  });
+  function chooseMyCar(id) {
+    try {
+      localStorage.setItem("pitboard_car", String(id));
+    } catch (e) {}
+    setMyCarId(id);
+  }
+  function resetRoleAndCar() {
+    try {
+      localStorage.removeItem("pitboard_role");
+      localStorage.removeItem("pitboard_car");
+    } catch (e) {}
+    setMyCarId(null);
+    setRole(null);
+  }
+  // Admin : tableau récapitulatif compact (toutes les tuiles fermées, sur un seul écran)
+  const [recap, setRecap] = useState(() => {
+    try {
+      return localStorage.getItem("pitboard_recap") !== "0";
+    } catch (e) {
+      return true;
+    }
+  });
+  function toggleRecap() {
+    setRecap((prev) => {
+      try {
+        localStorage.setItem("pitboard_recap", prev ? "0" : "1");
+      } catch (e) {}
+      return !prev;
+    });
+  }
+  const recapView = isAdmin && recap;
+
   const [flag, setFlag] = useState("vert");
   const [flash, setFlash] = useState(false);
   const [cars, setCars] = useState(emptyCars());
   const [showSetup, setShowSetup] = useState(false);
   const [showMessageForm, setShowMessageForm] = useState(true);
+  const [modal, setModal] = useState(null); // team manager : "announce" | "message" | "tech"
+  const [driversOpen, setDriversOpen] = useState(false); // menu déroulant "autres pilotes"
+  const [techAck, setTechAck] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("pitboard_techack") || "{}") || {};
+    } catch (e) {
+      return {};
+    }
+  }); // { [carId]: id de la dernière fiche technique envoyée }
   const [calls, setCalls] = useState([]);
   const [messages, setMessages] = useState([]);
   const [flagHistory, setFlagHistory] = useState([{ flag: "vert", ts: Date.now() }]);
@@ -647,15 +1366,32 @@ export default function PitBoard() {
     idleConsoLh: 3, // consommation au ralenti (L/h) pendant que la voiture est à l'arrêt au stand (0 km/h)
     circuitName: "",
     circuitLengthKm: 0,
+    liveEnabled: false, // flux RIS Live Timing (classement, tours) relayé par un poste Admin
+    liveUuid: "", // uuid du flux RIS (change à chaque événement)
+    liveSource: "direct", // "direct" : le poste Admin lit le flux ; "page" : il le reçoit de la page RIS ouverte (favori)
+    rcLog: [], // historique des messages RC [{ t (ms), m }]
+    liveRisUrl: "", // adresse de la page RIS à ouvrir pour le mode "page" (ex. https://live.ris-timing.be/funbe)
+    liveFlagAuto: false, // drapeaux vert/jaune pilotés par le flux (le rouge reste manuel)
+    drivers: {}, // pilotes par voiture : { [idVoiture]: { list, relays } } (voir lib/drivers.js)
   });
   const [showSettings, setShowSettings] = useState(false);
+  const [openDriverCars, setOpenDriverCars] = useState(() => new Set()); // voitures dont l'éditeur de pilotes est ouvert
+  // dernier flux reçu via Supabase (écrit par le poste Admin relais) et état du relais local
+  const [liveRow, setLiveRow] = useState(null); // { seq, generatedAt, fetchedAt, uuid, status, trackStateRaw, cars }
+  const [relayStatus, setRelayStatus] = useState(null);
+  const lastRawRef = useRef(null); // dernier flux brut reçu (poste Admin), pour l'échantillon de diagnostic
+  const [sampleText, setSampleText] = useState(""); // seulement sur le poste Admin qui relaie
+  const pushFlagRef = useRef(null);
+  const lastFeedFlagRef = useRef(null);
+  const lastSeenFlagRef = useRef(null);
+  const autoPushedFlagRef = useRef(null);
+  const manualOverrideRef = useRef(null);
   const [advancedMode, setAdvancedMode] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [exportCsvText, setExportCsvText] = useState(null); // null = modale fermée
   const [exportCopyStatus, setExportCopyStatus] = useState("");
   const audioCtxRef = useRef(null);
-  const knownCallIdsRef = useRef(null); // null = pas encore initialisé (1er chargement)
   const justAddedLocallyRef = useRef(new Set());
   const justAddedMessageLocallyRef = useRef(new Set());
   const [soundOn, setSoundOn] = useState(true);
@@ -668,7 +1404,6 @@ export default function PitBoard() {
   const messagesRef = useRef([]);
   const carsRef = useRef([]);
   const settingsRef = useRef(settings);
-  const knownMessageIdsRef = useRef(null);
   const lastKnownFlagRef = useRef(null);
   const flagTsRef = useRef(0);
   useEffect(() => {
@@ -705,15 +1440,104 @@ export default function PitBoard() {
     }
   }, [calls, confirmExitId]);
 
-  const configuredCars = useMemo(
+  const allConfiguredCars = useMemo(
     () => cars.filter((c) => c.numero.trim() !== ""),
     [cars]
   );
+  // voiture du team manager connecté (null pour les autres rôles ou tant qu'il n'a pas choisi)
+  const myCar = role === "manager" ? allConfiguredCars.find((c) => c.id === myCarId) || null : null;
+  // voitures visibles sur cet écran : toutes, sauf pour un team manager qui ne voit que la sienne
+  const configuredCars = useMemo(
+    () => (role === "manager" ? (myCar ? [myCar] : []) : allConfiguredCars),
+    [allConfiguredCars, role, myCar]
+  );
+  // annonces vocales : un team manager n'entend que celles de sa propre voiture
+  const myCarIdRef = useRef(null);
+  useEffect(() => {
+    myCarIdRef.current = myCar ? myCar.id : null;
+  }, [myCar]);
+  function speaksFor(carId) {
+    return myCarIdRef.current == null || myCarIdRef.current === carId;
+  }
+  // formulaires d'annonce et de message : la voiture du team manager est présélectionnée
+  useEffect(() => {
+    if (myCar) {
+      setFCar(String(myCar.id));
+      setMCar(String(myCar.id));
+      setTechCarId(String(myCar.id));
+    }
+  }, [myCar && myCar.id]);
+
+  // flux live (RIS) tel que reçu par cet écran. Le classement et les tours sont utilisés
+  // tant que le relais Admin est vivant ; si le flux lui-même n'évolue plus (feedFresh = false),
+  // les valeurs restent affichées mais un avertissement apparaît dans l'en-tête.
+  const liveInfo = useMemo(() => {
+    if (!settings.liveEnabled || !liveRow || !liveRow.cars) return null;
+    if ((liveRow.uuid || "") !== (settings.liveUuid || "").trim()) return null; // flux d'un autre événement
+    const relayAgeSec = Math.max(0, Math.round((now - liveRow.fetchedAt) / 1000));
+    const feedAgeSec = Math.max(0, Math.round((liveRow.fetchedAt - liveRow.generatedAt) / 1000));
+    return {
+      cars: liveRow.cars,
+      // lecture directe : une donnée toutes les 3 s ; mode page RIS : la page RIS rafraîchit à son rythme
+      relayAlive: relayAgeSec <= (settings.liveSource === "page" ? 120 : 25),
+      relayAgeSec,
+      feedFresh: feedAgeSec <= 90 && liveRow.status !== "FINISHED",
+      feedAgeSec,
+      status: liveRow.status || "",
+      trackStateRaw: liveRow.trackStateRaw,
+      generatedAt: liveRow.generatedAt,
+      rc: Array.isArray(liveRow.rc) ? liveRow.rc : [],
+      elapsedMs: liveRow.elapsedMs == null ? null : liveRow.elapsedMs,
+      remainingMs: liveRow.remainingMs == null ? null : liveRow.remainingMs,
+    };
+  }, [settings.liveEnabled, settings.liveUuid, settings.liveSource, liveRow, now]);
+
+  // données live d'une voiture (null si pas de flux, relais arrêté ou voiture absente du flux)
+  function liveFor(car) {
+    if (!liveInfo || !liveInfo.relayAlive) return null;
+    return liveInfo.cars[normalizeCarNumber(car.numero)] || null;
+  }
+  // classement affiché : celui du flux s'il existe, sinon le classement saisi à la main
+  function rankOf(car) {
+    const l = liveFor(car);
+    return (l && l.pos) || car.classement || 0;
+  }
+
+  // messages de la direction de course (RC) : généraux pour tous, ou filtrés sur nos numéros de voiture
+  const rcSeenRef = useRef({});
+  const [rcDismissed, setRcDismissed] = useState(() => new Set());
+  const rcMessages = useMemo(() => {
+    if (!settings.liveEnabled || !liveInfo || !liveInfo.rc || liveInfo.rc.length === 0) return [];
+    const wanted = (role === "manager" ? (myCar ? [myCar] : []) : allConfiguredCars).map((c) =>
+      String(Number(normalizeCarNumber(c.numero)))
+    );
+    return visibleRcMessages(liveInfo.rc, wanted, now, rcSeenRef.current, rcDismissed, liveInfo.generatedAt);
+  }, [settings.liveEnabled, liveInfo, role, myCar, allConfiguredCars, now, rcDismissed]);
+  // message RC visé par numéro de voiture (pour la tuile de cette voiture)
+  function rcForCar(car) {
+    const n = String(Number(normalizeCarNumber(car.numero)));
+    return rcMessages.filter((m) => m.nums.includes(n));
+  }
+
+  // historique conservé des messages RC pour une voiture : ceux qui la citent + les messages généraux,
+  // du plus récent au plus ancien (heure = première apparition dans le flux, enregistrée par le poste Admin)
+  function rcLogForCar(car) {
+    const log = Array.isArray(settings.rcLog) ? settings.rcLog : [];
+    if (log.length === 0) return [];
+    const n = String(Number(normalizeCarNumber(car.numero)));
+    return log
+      .filter((l) => {
+        const nums = carNumbersIn(l.m);
+        return nums.length === 0 || nums.includes(n);
+      })
+      .slice()
+      .reverse();
+  }
 
   // diagnostic automatique minimal : détecte les incohérences de données courantes
   const diagnostics = useMemo(() => {
     const issues = [];
-    const numeros = configuredCars.map((c) => c.numero.trim());
+    const numeros = allConfiguredCars.map((c) => c.numero.trim());
     const dupes = numeros.filter((n, i) => numeros.indexOf(n) !== i);
     [...new Set(dupes)].forEach((n) => issues.push(`Numéro de voiture en double : #${n}`));
 
@@ -732,7 +1556,7 @@ export default function PitBoard() {
     if (settings.yellowSpeedKmh <= 0) issues.push("Vitesse drapeau jaune invalide (≤ 0 km/h)");
     if (settings.maxFuelSimultaneous <= 0) issues.push("Nombre de pompes invalide (≤ 0)");
     return issues;
-  }, [cars, configuredCars, calls, stints, techChecks, settings]);
+  }, [cars, allConfiguredCars, calls, stints, techChecks, settings]);
 
   function toggleExpand(carId) {
     setExpandedTiles((prev) => {
@@ -846,16 +1670,7 @@ export default function PitBoard() {
           const grouped = {};
           stintsRes.data.forEach((r) => {
             if (!grouped[r.car_id]) grouped[r.car_id] = { lastExitAt: null, log: [] };
-            grouped[r.car_id].log.push({
-              n: r.n,
-              durationSec: r.duration_sec,
-              laps: r.laps ?? "",
-              vertSec: r.vert_sec || 0,
-              jauneSec: r.jaune_sec || 0,
-              idleSec: r.idle_sec || 0,
-              refueled: !!r.refueled,
-              _dbId: r.id, // conservé pour les mises à jour ciblées (ex: nombre de tours)
-            });
+            grouped[r.car_id].log.push(stintRowToApp(r));
           });
           stintCurrentRes.data.forEach((r) => {
             if (!grouped[r.car_id]) grouped[r.car_id] = { lastExitAt: null, log: [] };
@@ -901,9 +1716,18 @@ export default function PitBoard() {
           return;
         }
         const call = callRowToApp(row);
-        if (payload.eventType === "INSERT" && soundOnRef.current && !justAddedLocallyRef.current.has(call.id)) {
+        if (payload.eventType === "INSERT" && soundOnRef.current && speaksFor(call.carId) && !justAddedLocallyRef.current.has(call.id)) {
           const secs = (call.arrivalAt - Date.now()) / 1000;
           speakAnnouncement(audioCtxRef, call.numero, secs);
+        }
+        // un autre poste vient de cliquer "Entrée" (countdown -> instand) : on annonce aussi ici.
+        // Sur le poste qui a cliqué, l'état local est déjà "instand" quand l'écho arrive,
+        // donc cette condition est fausse et la phrase n'est pas rejouée une 2e fois.
+        if (payload.eventType === "UPDATE" && soundOnRef.current) {
+          const before = callsRef.current.find((c) => c.id === call.id);
+          if (before && before.phase === "countdown" && call.phase === "instand" && speaksFor(call.carId)) {
+            speakTrackPoint(audioCtxRef, call.numero, "Entrée");
+          }
         }
         setCalls((prev) => {
           const exists = prev.some((c) => c.id === call.id);
@@ -916,7 +1740,7 @@ export default function PitBoard() {
           return;
         }
         const msg = messageRowToApp(payload.new);
-        if (payload.eventType === "INSERT" && soundOnRef.current && !justAddedMessageLocallyRef.current.has(msg.id)) {
+        if (payload.eventType === "INSERT" && soundOnRef.current && speaksFor(msg.carId) && !justAddedMessageLocallyRef.current.has(msg.id)) {
           speakMessage(audioCtxRef, msg.numero, msg.pilote, msg.text);
         }
         setMessages((prev) => {
@@ -950,57 +1774,46 @@ export default function PitBoard() {
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "stints" }, (payload) => {
         setStints((prev) => {
-          const next = { ...prev };
-          const carId = (payload.new || payload.old).car_id;
-          const st = next[carId] || { lastExitAt: null, log: [] };
           if (payload.eventType === "DELETE") {
-            next[carId] = { ...st, log: st.log.filter((r) => r._dbId !== payload.old.id) };
+            // sur un DELETE, Supabase ne renvoie que l'id : on le retire de toutes les voitures
+            const delId = payload.old && payload.old.id;
+            const next = {};
+            Object.keys(prev).forEach((k) => {
+              next[k] = { ...prev[k], log: (prev[k].log || []).filter((r) => r._dbId !== delId) };
+            });
             return next;
           }
           const r = payload.new;
-          const entry = {
-            n: r.n,
-            durationSec: r.duration_sec,
-            laps: r.laps ?? "",
-            vertSec: r.vert_sec || 0,
-            jauneSec: r.jaune_sec || 0,
-            idleSec: r.idle_sec || 0,
-            refueled: !!r.refueled,
-            _dbId: r.id,
-          };
-          const exists = st.log.some((x) => x._dbId === entry._dbId);
-          next[carId] = {
-            ...st,
-            log: exists ? st.log.map((x) => (x._dbId === entry._dbId ? entry : x)) : [...st.log, entry],
-          };
-          return next;
+          const st = prev[r.car_id] || { lastExitAt: null, log: [] };
+          return { ...prev, [r.car_id]: { ...st, log: mergeStintEntry(st.log, stintRowToApp(r)) } };
         });
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "stint_current" }, (payload) => {
+        // sur un DELETE, payload.new est un objet vide : l'ancienne ligne est dans payload.old
+        const rec = payload.eventType === "DELETE" ? payload.old : payload.new;
+        if (!rec || rec.car_id == null) return;
         setStints((prev) => {
-          const next = { ...prev };
-          const carId = (payload.new || payload.old).car_id;
-          const st = next[carId] || { lastExitAt: null, log: [] };
-          next[carId] = {
-            ...st,
-            lastExitAt: payload.new?.last_exit_at ? new Date(payload.new.last_exit_at).getTime() : null,
-          };
-          return next;
+          const st = prev[rec.car_id] || { lastExitAt: null, log: [] };
+          const lastExitAt =
+            payload.eventType !== "DELETE" && rec.last_exit_at ? new Date(rec.last_exit_at).getTime() : null;
+          return { ...prev, [rec.car_id]: { ...st, lastExitAt } };
         });
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "technical_checks" }, (payload) => {
         setTechChecks((prev) => {
-          const next = { ...prev };
-          const carId = (payload.new || payload.old).car_id;
-          const list = next[carId] || [];
           if (payload.eventType === "DELETE") {
-            next[carId] = list.filter((r) => r.id !== payload.old.id);
+            const delId = payload.old && payload.old.id;
+            const next = {};
+            Object.keys(prev).forEach((k) => {
+              next[k] = (prev[k] || []).filter((r) => r.id !== delId);
+            });
             return next;
           }
+          const carId = payload.new.car_id;
           const rec = techRowToApp(payload.new);
+          const list = prev[carId] || [];
           const exists = list.some((r) => r.id === rec.id);
-          next[carId] = exists ? list.map((r) => (r.id === rec.id ? rec : r)) : [...list, rec];
-          return next;
+          return { ...prev, [carId]: exists ? list.map((r) => (r.id === rec.id ? rec : r)) : [...list, rec] };
         });
       })
       .subscribe((status) => {
@@ -1029,6 +1842,234 @@ export default function PitBoard() {
       supabase.removeChannel(channel);
     };
   }, []);
+
+  // --- FLUX LIVE : lecture partagée (tous les postes) ---
+  // canal séparé du canal principal : si la table live_timing n'existe pas encore, le reste
+  // de l'application n'est pas affecté.
+  useEffect(() => {
+    let cancelled = false;
+    const rowToLive = (row) => (row && row.data && row.data.cars ? row.data : null);
+
+    async function loadLive() {
+      try {
+        const { data } = await supabase.from("live_timing").select("*").eq("id", 1).maybeSingle();
+        if (!cancelled) setLiveRow(rowToLive(data));
+      } catch (e) {}
+    }
+    loadLive();
+
+    const liveChannel = supabase
+      .channel("pitboard-live")
+      .on("postgres_changes", { event: "*", schema: "public", table: "live_timing" }, (payload) => {
+        if (payload.eventType === "DELETE") setLiveRow(null);
+        else setLiveRow(rowToLive(payload.new));
+      })
+      .subscribe();
+
+    const onOnline = () => loadLive();
+    window.addEventListener("online", onOnline);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("online", onOnline);
+      supabase.removeChannel(liveChannel);
+    };
+  }, []);
+
+  // --- FLUX LIVE : relais (poste Admin uniquement) ---
+  // Un seul poste lit le flux RIS toutes les 3 s et l'écrit dans Supabase ; les autres le
+  // reçoivent par Realtime. Les drapeaux vert/jaune sont appliqués ici si l'option est active.
+  useEffect(() => {
+    const uuid = (settings.liveUuid || "").trim();
+    const pageMode = settings.liveSource === "page";
+    // en lecture directe, on ne démarre que sur un uuid complet : pendant la saisie, aucune
+    // requête partielle n'est envoyée. En mode "page", l'uuid vient de la page RIS elle-même.
+    if (!isAdmin || !settings.liveEnabled || (!pageMode && !/^[0-9a-fA-F-]{36}$/.test(uuid))) {
+      setRelayStatus(null);
+      return;
+    }
+    setRelayStatus(null); // efface l'ancien message (ex. erreur de la lecture directe) à chaque changement de mode
+    let stopped = false;
+    let busy = false;
+    let lastSeq = null;
+    let lastWriteAt = 0;
+
+    function applyAutoFlag(live, nowMs) {
+      const cur = lastKnownFlagRef.current;
+
+      // changement de drapeau fait par quelqu'un d'autre que le relais (n'importe quel poste) :
+      // c'est une commande manuelle, elle reste prioritaire tant que le flux ne change pas lui-même
+      if (lastSeenFlagRef.current === null) {
+        lastSeenFlagRef.current = cur;
+      } else if (cur !== lastSeenFlagRef.current) {
+        if (cur !== autoPushedFlagRef.current) {
+          manualOverrideRef.current = { feedFlag: lastFeedFlagRef.current };
+        }
+        lastSeenFlagRef.current = cur;
+      }
+      lastFeedFlagRef.current = live.flag;
+
+      if (!settingsRef.current.liveFlagAuto) return;
+      if (!live.flag) return; // état de piste vide ou inconnu : pas de changement automatique
+      if (live.status === "FINISHED") return;
+      if (nowMs - live.generatedAt > 90000) return; // flux ancien : on ne touche pas au drapeau
+      const ov = manualOverrideRef.current;
+      if (ov) {
+        if (ov.feedFlag === live.flag) return;
+        manualOverrideRef.current = null;
+      }
+      // un rouge posé à la main se lève à la main ; un rouge venu du flux se lève avec lui
+      if (cur === "rouge" && autoPushedFlagRef.current !== "rouge") return;
+      if (cur === live.flag) return;
+      autoPushedFlagRef.current = live.flag;
+      lastSeenFlagRef.current = live.flag;
+      if (pushFlagRef.current) pushFlagRef.current(live.flag);
+    }
+
+    // meilleurs intermédiaires / meilleur tour PAR PILOTE : chaque valeur nouvelle du flux est
+    // attribuée au pilote du relais en cours (le pilote prévu ou confirmé dans PitBoard).
+    // Seul le poste Admin qui relaie le flux les enregistre (une écriture seulement si un record tombe).
+    const seenByCar = {};
+    function recordBests(live) {
+      let drivers = settingsRef.current.drivers || {};
+      let changed = false;
+      carsRef.current.forEach((car) => {
+        const lc = live.cars[normalizeCarNumber(car.numero)];
+        if (!lc) return;
+        const cfg = getCfg(drivers, car.id);
+        if (cfg.list.length === 0) return;
+        const st = stintsRef.current[car.id] || { lastExitAt: null, log: [] };
+        const logN = (st.log || []).length;
+        // en piste : relais en cours ; au stand : le relais qui vient de se terminer
+        const relayN = st.lastExitAt ? logN + 1 : logN;
+        const driverId = relayN >= 1 ? resolveRelay(cfg, relayN).id : null;
+        const first = !seenByCar[car.id];
+        const { seen, obs } = observeLap(seenByCar[car.id], lc);
+        seenByCar[car.id] = seen;
+        if (first || !driverId) return; // premier flux : on mémorise seulement
+        const cur = cfg.best[driverId];
+        const nb = mergeBest(cur, obs);
+        if (nb !== cur) {
+          drivers = { ...drivers, [car.id]: { ...cfg, best: { ...cfg.best, [driverId]: nb } } };
+          changed = true;
+        }
+      });
+      if (changed) pushSettings({ ...settingsRef.current, drivers });
+    }
+
+    // historique des messages RC : le poste Admin qui relaie note chaque nouveau message avec l'heure
+    // à laquelle il apparaît (l'heure "at" du flux est celle de la génération du flux, pas de la parution)
+    let rcPrev = null;
+    function recordRc(live, nowMs) {
+      const msgs = live.rc || [];
+      const log = Array.isArray(settingsRef.current.rcLog) ? settingsRef.current.rcLog : [];
+      const added = [];
+      msgs.forEach((e) => {
+        const isNew = rcPrev ? !rcPrev.has(e.id + "|" + e.message) : !log.some((l) => l.m === e.message);
+        if (isNew) added.push({ t: nowMs, m: e.message });
+      });
+      rcPrev = new Set(msgs.map((e) => e.id + "|" + e.message));
+      if (added.length > 0) pushSettings({ ...settingsRef.current, rcLog: [...log, ...added].slice(-300) });
+    }
+
+    // traite un flux reçu (lecture directe ou page RIS) : l'écrit dans Supabase pour tous les
+    // postes, applique les drapeaux automatiques et met à jour l'état du relais
+    async function ingest(raw, via, srcUuid) {
+      {
+        lastRawRef.current = raw;
+        const live = parseLiveTiming(raw);
+        const nowMs = Date.now();
+        let writeError = "";
+        if (live.seq !== lastSeq || nowMs - lastWriteAt >= 10000) {
+          const payload = {
+            uuid: srcUuid,
+            seq: live.seq,
+            generatedAt: live.generatedAt,
+            fetchedAt: nowMs,
+            status: live.status,
+            trackStateRaw: live.trackStateRaw,
+            elapsedMs: live.elapsedMs,
+            remainingMs: live.remainingMs,
+            rc: live.rc,
+            cars: live.cars,
+          };
+          const { error } = await supabase
+            .from("live_timing")
+            .upsert({ id: 1, data: payload, updated_at: new Date(nowMs).toISOString() });
+          if (error) writeError = error.message || "écriture Supabase refusée";
+          else {
+            lastSeq = live.seq;
+            lastWriteAt = nowMs;
+          }
+        }
+        applyAutoFlag(live, nowMs);
+        try {
+          recordBests(live);
+          recordRc(live, nowMs);
+        } catch (e) {}
+        if (!stopped) {
+          setRelayStatus({
+            ok: !writeError,
+            error: writeError ? `Supabase : ${writeError} (la table live_timing existe-t-elle ?)` : "",
+            via,
+            at: nowMs,
+            generatedAt: live.generatedAt,
+            nCars: Object.keys(live.cars).length,
+            trackStateRaw: live.trackStateRaw,
+            status: live.status,
+          });
+        }
+        // mode "page" : l'uuid vient de la page RIS, on le mémorise pour que tous les postes
+        // reconnaissent le flux (changer l'uuid redémarre ce relais, sans conséquence)
+        if (pageMode && srcUuid && srcUuid !== (settingsRef.current.liveUuid || "").trim()) {
+          pushSettings({ ...settingsRef.current, liveUuid: srcUuid });
+        }
+      }
+    }
+
+    const showError = (e) => {
+      if (!stopped) setRelayStatus({ ok: false, error: (e && e.message) || String(e), at: Date.now() });
+    };
+
+    async function tick() {
+      if (busy || stopped) return;
+      busy = true;
+      try {
+        const { raw, via } = await fetchLiveTiming(uuid);
+        if (stopped) return;
+        await ingest(raw, via, uuid);
+      } catch (e) {
+        showError(e);
+      } finally {
+        busy = false;
+      }
+    }
+
+    if (pageMode) {
+      // flux transmis par la page RIS (favori) : seuls les messages venant de RIS sont acceptés
+      const onMessage = (event) => {
+        const msg = readRisMessage(event);
+        if (!msg) return;
+        ingest(msg.raw, "page", msg.uuid || uuid).catch(showError);
+      };
+      window.addEventListener("message", onMessage);
+      return () => {
+        stopped = true;
+        window.removeEventListener("message", onMessage);
+      };
+    }
+
+    tick();
+    const timer = setInterval(tick, 3000);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [isAdmin, settings.liveEnabled, settings.liveUuid, settings.liveSource]);
+
+  // quand on (dés)active les drapeaux auto, on repart de zéro : plus de commande manuelle en attente
+  useEffect(() => {
+    manualOverrideRef.current = null;
+  }, [settings.liveFlagAuto, settings.liveUuid]);
 
   // -- helpers de mappage app -> lignes Supabase --
   function carToRow(c) {
@@ -1064,7 +2105,10 @@ export default function PitBoard() {
 
   // annonces : nouvelle -> insert ; modifiée -> update ciblé ; retirée -> clôturée (jamais supprimée)
   async function pushCalls(next) {
-    const prev = calls;
+    // on compare avec la ref (toujours à jour) et non avec le state de la fermeture : la
+    // minuterie d'une seconde est créée une seule fois et verrait sinon un état périmé
+    const prev = callsRef.current;
+    callsRef.current = next;
     setCalls(next);
     try {
       const prevById = new Map(prev.map((c) => [c.id, c]));
@@ -1113,7 +2157,8 @@ export default function PitBoard() {
 
   // messages : éphémères -> nouveau = insert, disparu (expiré ou retiré) = delete
   async function pushMessages(next) {
-    const prev = messages;
+    const prev = messagesRef.current;
+    messagesRef.current = next;
     setMessages(next);
     try {
       const prevIds = new Set(prev.map((m) => m.id));
@@ -1140,20 +2185,23 @@ export default function PitBoard() {
 
   // réglages globaux : une seule ligne, simple update
   async function pushSettings(next) {
+    settingsRef.current = next; // à jour tout de suite, avant même le prochain rendu
     setSettings(next);
     try {
       await supabase.from("app_settings").update({ data: next, updated_at: new Date().toISOString() }).eq("id", 1);
     } catch (e) {}
   }
 
-  // relais : nouvelle entrée de log -> insert ; entrée modifiée (ex: tours) -> update ciblé ;
-  // relais en cours (lastExitAt) -> upsert dans stint_current
+  // relais : nouveau relais -> insert ; relais modifié (tours, temps à l'arrêt) -> update ciblé
+  // par (voiture, n) ; relais en cours (lastExitAt) -> upsert dans stint_current
   async function pushStints(next) {
-    const prev = stints;
+    const prev = stintsRef.current;
+    stintsRef.current = next;
     setStints(next);
     try {
       for (const carIdStr of Object.keys(next)) {
         const carId = Number(carIdStr);
+        if (!Number.isFinite(carId)) continue;
         const nextSt = next[carIdStr] || { lastExitAt: null, log: [] };
         const prevSt = prev[carIdStr] || { lastExitAt: null, log: [] };
 
@@ -1164,28 +2212,34 @@ export default function PitBoard() {
           });
         }
 
-        const prevByDbId = new Map(prevSt.log.filter((r) => r._dbId).map((r) => [r._dbId, r]));
-        for (const entry of nextSt.log) {
-          if (!entry._dbId) {
-            // nouvelle entrée de relais, jamais encore enregistrée
+        const prevByN = new Map((prevSt.log || []).map((r) => [r.n, r]));
+        for (const entry of nextSt.log || []) {
+          const old = prevByN.get(entry.n);
+          if (!old) {
             await supabase.from("stints").insert({
               car_id: carId,
               n: entry.n,
-              duration_sec: entry.durationSec,
-              laps: entry.laps === "" ? null : Number(entry.laps),
-              vert_sec: entry.vertSec,
-              jaune_sec: entry.jauneSec,
-              idle_sec: entry.idleSec || 0,
+              duration_sec: toInt(entry.durationSec),
+              laps: toIntOrNull(entry.laps),
+              vert_sec: toInt(entry.vertSec),
+              jaune_sec: toInt(entry.jauneSec),
+              idle_sec: toInt(entry.idleSec),
               refueled: !!entry.refueled,
             });
-          } else {
-            const old = prevByDbId.get(entry._dbId);
-            if (old && JSON.stringify(old) !== JSON.stringify(entry)) {
-              await supabase
-                .from("stints")
-                .update({ laps: entry.laps === "" ? null : Number(entry.laps) })
-                .eq("id", entry._dbId);
-            }
+          } else if (
+            old.laps !== entry.laps ||
+            (old.idleSec || 0) !== (entry.idleSec || 0) ||
+            !!old.refueled !== !!entry.refueled
+          ) {
+            await supabase
+              .from("stints")
+              .update({
+                laps: toIntOrNull(entry.laps),
+                idle_sec: toInt(entry.idleSec),
+                refueled: !!entry.refueled,
+              })
+              .eq("car_id", carId)
+              .eq("n", entry.n);
           }
         }
       }
@@ -1246,7 +2300,14 @@ export default function PitBoard() {
     setFlag("vert");
     lastKnownFlagRef.current = "vert";
     flagTsRef.current = nowMs;
-    pushSettings({ ...settings, eventStartAt: "", eventDurationSec: 0 });
+    // les pilotes et leur ordre sont conservés, seuls les relais confirmés sont effacés
+    pushSettings({
+      ...settings,
+      eventStartAt: "",
+      eventDurationSec: 0,
+      drivers: resetDriverRelays(settings.drivers),
+      rcLog: [],
+    });
     setExpandedTiles(new Set());
     setConfirmExitId(null);
     setTechCarId("");
@@ -1263,6 +2324,7 @@ export default function PitBoard() {
         "Team manager",
         "Classement",
         "Relais n°",
+        "Pilote du relais",
         "Durée relais",
         "Tours",
         "Temps vert",
@@ -1288,19 +2350,22 @@ export default function PitBoard() {
           car.numero,
           car.team || "",
           car.pilote || "",
-          car.classement || "",
-          "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+          rankOf(car) || "",
+          "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
         ]);
         return;
       }
+      const dcfg = getCfg(settings.drivers, car.id);
       log.forEach((r, i) => {
         const t = tech[i] || {};
+        const rd = dcfg.list.find((d) => d.id === resolveRelay(dcfg, r.n).id);
         rows.push([
           car.numero,
           car.team || "",
           car.pilote || "",
-          car.classement || "",
+          rankOf(car) || "",
           r.n,
+          driverName(rd),
           fmtTimeHMS(r.durationSec),
           r.laps || "",
           fmtTimeHMS(r.vertSec || 0),
@@ -1510,12 +2575,77 @@ export default function PitBoard() {
       const nowMs = Date.now();
       const durationSec = Math.round((nowMs - st.lastExitAt) / 1000);
       const { vertSec, jauneSec } = computeFlagSplit(st.lastExitAt, nowMs, flagHistoryRef.current);
+      // tours du relais = tour atteint maintenant - tour atteint à la fin du relais précédent (flux live)
+      const relayN = st.log.length + 1;
+      const carObj = carsRef.current.find((c) => c.id === carId);
+      const lv = carObj ? liveFor(carObj) : null;
+      const cfgOrig = getCfg(settingsRef.current.drivers, carId);
+      let cfg0 = cfgOrig;
+      let autoLaps = null;
+      if (lv && lv.laps != null) {
+        cfg0 = setEndLap(cfg0, relayN, lv.laps);
+        autoLaps = relayLapsFromEnds(cfg0, relayN);
+      }
       const newLog = [
         ...st.log,
-        { n: st.log.length + 1, durationSec, laps: "", vertSec, jauneSec, refueled: !!refueled },
+        {
+          n: relayN,
+          durationSec,
+          laps: autoLaps != null ? autoLaps : "",
+          vertSec: Math.round(vertSec),
+          jauneSec: Math.round(jauneSec),
+          refueled: !!refueled,
+        },
       ];
       pushStints({ ...stintsRef.current, [carId]: { lastExitAt: null, log: newLog } });
+      // fige le pilote (prévu ou confirmé) du relais qui vient de se terminer
+      const frozen = freezeRelay(cfg0, relayN);
+      if (frozen !== cfgOrig) pushDriversCfg(carId, frozen);
     }
+  }
+
+  // pilotes : une seule écriture dans les réglages partagés (pas de table supplémentaire)
+  function pushDriversCfg(carId, cfg) {
+    const cur = settingsRef.current;
+    pushSettings({ ...cur, drivers: { ...(cur.drivers || {}), [carId]: cfg } });
+  }
+
+  function confirmRelayDriver(carId, n, driverId) {
+    pushDriversCfg(carId, setRelayDriver(getCfg(settingsRef.current.drivers, carId), n, driverId));
+  }
+
+  // état des pilotes d'une voiture à l'instant "now" : pilote du relais en cours (ou à venir) et
+  // temps de roulage cumulé par pilote ; null si aucun pilote n'est encodé pour cette voiture
+  function driverStatsFor(car) {
+    const cfg = getCfg(settings.drivers, car.id);
+    if (cfg.list.length === 0) return null;
+    const st = stints[car.id] || { lastExitAt: null, log: [] };
+    const log = st.log || [];
+    const n = log.length + 1;
+    let current = null;
+    if (st.lastExitAt) {
+      const split = computeFlagSplit(st.lastExitAt, now, flagHistory);
+      const lvNow = liveFor(car);
+      const prevEnd = endLapOf(cfg, n - 1);
+      current = {
+        n,
+        durationSec: Math.max(0, (now - st.lastExitAt) / 1000),
+        vertSec: split.vertSec,
+        jauneSec: split.jauneSec,
+        laps: lvNow && lvNow.laps != null && prevEnd != null ? Math.max(0, lvNow.laps - prevEnd) : 0,
+      };
+    }
+    const cur = resolveRelay(cfg, n);
+    return {
+      cfg,
+      n,
+      onTrack: !!st.lastExitAt,
+      drivenN: log.length + (st.lastExitAt ? 1 : 0),
+      cur,
+      curDriver: cfg.list.find((d) => d.id === cur.id) || null,
+      prevId: n > 1 ? resolveRelay(cfg, n - 1).id : null,
+      totals: driverTotals(cfg, log, current),
+    };
   }
 
   function logStintExit(carId, idleSec) {
@@ -1560,7 +2690,11 @@ export default function PitBoard() {
         brakeFront: "",
         engineTemp: "",
       };
-      setTechChecks((prev) => ({ ...prev, [carId]: [...(prev[carId] || []), newRecord] }));
+      setTechChecks((prev) => {
+        const list = prev[carId] || [];
+        if (list.some((r) => r.id === newRecord.id)) return prev;
+        return { ...prev, [carId]: [...list, newRecord] };
+      });
       setTechCarId(String(carId));
     } catch (e) {}
   }
@@ -1643,12 +2777,25 @@ export default function PitBoard() {
     }
 
     const newMsg = messageRowToApp(data);
-    setMessages((prev) => [...prev, newMsg]);
+    setMessages((prev) => (prev.some((m) => m.id === newMsg.id) ? prev : [...prev, newMsg]));
     if (soundOnRef.current) speakMessage(audioCtxRef, newMsg.numero, newMsg.pilote, newMsg.text);
     justAddedMessageLocallyRef.current.add(newMsg.id);
     setTimeout(() => justAddedMessageLocallyRef.current.delete(newMsg.id), 4000);
     setMText("");
-    setMCar("");
+    setMCar(myCarIdRef.current != null ? String(myCarIdRef.current) : "");
+    if (myCarIdRef.current != null) setModal(null); // team manager : la fenêtre se ferme après l'envoi
+  }
+
+  // fiche technique envoyée : plus de clignotement, la fenêtre se ferme
+  function ackTech(carId, recordId) {
+    setTechAck((prev) => {
+      const next = { ...prev, [carId]: recordId };
+      try {
+        localStorage.setItem("pitboard_techack", JSON.stringify(next));
+      } catch (e) {}
+      return next;
+    });
+    setModal(null);
   }
 
   function removeMessage(id) {
@@ -1697,6 +2844,9 @@ export default function PitBoard() {
         .eq("id", 1);
     } catch (e) {}
   }
+  // le relais live tourne dans une minuterie créée une seule fois : il doit toujours appeler
+  // la version la plus récente de pushFlag (état `flag` et `calls` à jour)
+  pushFlagRef.current = pushFlag;
 
   const theme = FLAGS[flag];
   const bgStyle =
@@ -1721,9 +2871,16 @@ export default function PitBoard() {
       else idle.push({ car, call: null });
     });
     withCall.sort((a, b) => sortKey(a.call, now) - sortKey(b.call, now));
-    idle.sort((a, b) => (a.car.classement || a.car.id) - (b.car.classement || b.car.id));
+    // classement du flux live si disponible ; les voitures absentes du flux passent après
+    const liveActive = !!(liveInfo && liveInfo.relayAlive);
+    const sortKeyIdle = (car) => {
+      const l = liveFor(car);
+      if (l && l.pos) return l.pos;
+      return (liveActive ? 1000 : 0) + (car.classement || car.id);
+    };
+    idle.sort((a, b) => sortKeyIdle(a.car) - sortKeyIdle(b.car));
     return [...withCall, ...idle];
-  }, [configuredCars, calls, now]);
+  }, [configuredCars, calls, now, liveInfo]);
 
   // animation FLIP : quand l'ordre des encarts change (ex. après "voiture quitte les
   // stands"), on les fait glisser lentement (~2,5s) vers leur nouvelle position au lieu
@@ -1869,7 +3026,7 @@ export default function PitBoard() {
     }
 
     const newCall = callRowToApp(data);
-    setCalls((prev) => [...prev, newCall]);
+    setCalls((prev) => (prev.some((c) => c.id === newCall.id) ? prev : [...prev, newCall]));
     if (soundOnRef.current) {
       const secsLeft = (newCall.arrivalAt - Date.now()) / 1000;
       speakAnnouncement(audioCtxRef, newCall.numero, secsLeft);
@@ -1878,11 +3035,12 @@ export default function PitBoard() {
     // l'écho Realtime de cette même insertion ne redéclenche pas la voix
     justAddedLocallyRef.current.add(newCall.id);
     setTimeout(() => justAddedLocallyRef.current.delete(newCall.id), 4000);
-    setFCar("");
+    setFCar(myCarIdRef.current != null ? String(myCarIdRef.current) : "");
     setFMin("");
     setFSec("");
     setFFuel("");
     setFTasks("");
+    if (myCarIdRef.current != null) setModal(null); // team manager : la fenêtre se ferme après l'annonce
   }
 
   function removeCall(id) {
@@ -1982,6 +3140,53 @@ export default function PitBoard() {
     );
   }
 
+  // team manager : choix de sa voiture (une seule fois par appareil), parmi celles que l'admin a encodées
+  if (role === "manager" && !myCar) {
+    return (
+      <div className="min-h-screen w-full flex items-center justify-center bg-neutral-900 px-4">
+        <div className="max-w-sm w-full bg-black/60 border border-white/20 rounded-2xl p-6 flex flex-col gap-3">
+          <h1 className="text-white text-xl font-black text-center mb-2">Votre voiture</h1>
+          {allConfiguredCars.length === 0 ? (
+            <p className="text-white/70 text-sm text-center">
+              Aucune voiture n'est encore encodée. L'admin doit d'abord saisir les numéros de voiture dans la
+              configuration ; cette liste se mettra à jour toute seule.
+            </p>
+          ) : (
+            <>
+              <p className="text-white/60 text-xs text-center mb-2">
+                Choisissez votre numéro : vous ne verrez ensuite que votre voiture.
+              </p>
+              {allConfiguredCars.map((c) => (
+                <button
+                  key={c.id}
+                  onClick={() => chooseMyCar(c.id)}
+                  className="w-full text-left px-4 py-2.5 rounded-lg bg-white/10 hover:bg-white/20 border border-white/20 transition-colors flex items-center gap-3"
+                >
+                  <span
+                    className="w-3 h-8 rounded-sm flex-shrink-0"
+                    style={{ background: `linear-gradient(${c.couleur1} 50%, ${c.couleur2} 50%)` }}
+                  />
+                  <span>
+                    <span className="block text-white font-bold text-sm">#{c.numero}</span>
+                    {c.team && <span className="block text-white/50 text-xs">{c.team}</span>}
+                  </span>
+                </button>
+              ))}
+            </>
+          )}
+          <button
+            onClick={resetRoleAndCar}
+            className="text-white/50 text-xs underline self-center mt-1 hover:text-white"
+          >
+            Changer de rôle
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  const visibleMessages = myCar ? messages.filter((m) => m.carId === myCar.id || m.numero === myCar.numero) : messages;
+
   return (
     <div
       className="min-h-screen w-full transition-colors duration-500 ease-in-out"
@@ -1991,6 +3196,7 @@ export default function PitBoard() {
       }}
     >
       <div className="max-w-7xl mx-auto px-3 py-4 pb-20">
+        <style>{"@keyframes pbblink{0%,100%{background:#ff1f1f;color:#fff}50%{background:#ffe600;color:#000}}"}</style>
         {/* EN-TÊTE + HORLOGE + DÉCOMPTE + BOUTONS (une seule ligne) */}
         <div className="flex items-center justify-between gap-3 flex-wrap mb-4 bg-black/20 rounded-lg px-3 py-2">
           <div className="flex items-center gap-2">
@@ -1999,7 +3205,7 @@ export default function PitBoard() {
             </div>
             <div>
               <h1 className="text-black text-lg tracking-wide font-black leading-none whitespace-nowrap">
-                TABLEAU DES ARRÊTS
+                Gestion Team manager by JFP racing
               </h1>
               <p className="text-black/60 text-[10px] tracking-widest uppercase font-semibold whitespace-nowrap">
                 Gestion des arrêts au stand
@@ -2033,6 +3239,15 @@ export default function PitBoard() {
             >
               {advancedMode ? "🔧 Mode avancé" : "⚡ Mode simple"}
             </button>
+            {isAdmin && (
+              <button
+                onClick={toggleRecap}
+                className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide bg-black/20 text-black"
+                title="Vue récapitulative compacte (toutes les tuiles fermées sur un seul écran) ou vue détaillée"
+              >
+                {recap ? "▦ Vue récap" : "▤ Vue détaillée"}
+              </button>
+            )}
             {isAdmin && (
               <button
                 onClick={() => setShowSettings((s) => !s)}
@@ -2083,13 +3298,34 @@ export default function PitBoard() {
               {connectionStatus === "reconnecting" && <>🟠 Reconnexion</>}
               {connectionStatus === "offline" && <>🔴 Hors ligne</>}
             </div>
+            {settings.liveEnabled && (
+              <div
+                className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide bg-black/20 text-black"
+                title={
+                  !liveInfo
+                    ? "Aucune donnée reçue pour cet uuid. Un poste Admin doit être ouvert pour relayer le flux."
+                    : !liveInfo.relayAlive
+                    ? `Le poste Admin qui relaie le flux n'a rien envoyé depuis ${liveInfo.relayAgeSec} s : classement et tours ne sont plus mis à jour (classement manuel utilisé).`
+                    : liveInfo.status === "FINISHED"
+                    ? "Session terminée côté chronométrage."
+                    : !liveInfo.feedFresh
+                    ? `Le flux RIS n'évolue plus (dernière donnée il y a ${liveInfo.feedAgeSec} s).`
+                    : "Flux RIS à jour."
+                }
+              >
+                {!liveInfo && <>⚪ Live : en attente</>}
+                {liveInfo && !liveInfo.relayAlive && <>🟠 Live : relais arrêté</>}
+                {liveInfo && liveInfo.relayAlive && liveInfo.status === "FINISHED" && <>🏁 Live : terminé</>}
+                {liveInfo && liveInfo.relayAlive && liveInfo.status !== "FINISHED" && !liveInfo.feedFresh && (
+                  <>🟠 Live : flux figé</>
+                )}
+                {liveInfo && liveInfo.relayAlive && liveInfo.status !== "FINISHED" && liveInfo.feedFresh && (
+                  <>🟢 Live{settings.liveFlagAuto ? " · drapeaux auto" : ""}{liveInfo.trackStateRaw ? ` · ${liveInfo.trackStateRaw}` : ""}</>
+                )}
+              </div>
+            )}
             <button
-              onClick={() => {
-                try {
-                  localStorage.removeItem("pitboard_role");
-                } catch (e) {}
-                setRole(null);
-              }}
+              onClick={resetRoleAndCar}
               title="Changer de rôle"
               className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide bg-black/20 text-black"
             >
@@ -2097,7 +3333,7 @@ export default function PitBoard() {
               {role === "admin"
                 ? "Admin"
                 : role === "manager"
-                ? "Team Manager"
+                ? `Team Manager${myCar ? " #" + myCar.numero : ""}`
                 : role === "pitwall"
                 ? "Pit Wall"
                 : "Read Only"}
@@ -2293,6 +3529,192 @@ export default function PitBoard() {
                     className="px-2 py-1.5 text-sm rounded bg-black/50 text-white border border-white/20 focus:outline-none focus:border-white"
                   />
                 </label>
+              </div>
+              {/* CHRONOMÉTRAGE LIVE (RIS) */}
+              <div className="flex flex-col gap-2 p-2 rounded border border-white/15 bg-black/30">
+                <div className="text-white text-xs font-bold uppercase tracking-wide">
+                  Chronométrage live (RIS)
+                </div>
+                <label className="flex items-center gap-2 text-white text-xs">
+                  <input
+                    type="checkbox"
+                    checked={!!settings.liveEnabled}
+                    disabled={!canEdit}
+                    onChange={(e) => pushSettings({ ...settings, liveEnabled: e.target.checked })}
+                  />
+                  Utiliser le flux live (classement général et tours dans les encarts)
+                </label>
+                <div className="flex flex-col gap-1 text-white text-xs">
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="liveSource"
+                      checked={settings.liveSource !== "page"}
+                      disabled={!canEdit}
+                      onChange={() => pushSettings({ ...settings, liveSource: "direct" })}
+                    />
+                    Lecture directe du flux (nécessite l'autorisation de RIS)
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="radio"
+                      name="liveSource"
+                      checked={settings.liveSource === "page"}
+                      disabled={!canEdit}
+                      onChange={() => pushSettings({ ...settings, liveSource: "page" })}
+                    />
+                    Depuis la page RIS ouverte dans ce navigateur (favori)
+                  </label>
+                </div>
+                {settings.liveSource === "page" && (
+                  <div className="flex flex-col gap-1.5 p-2 rounded bg-white/5 text-white text-xs">
+                    <label className="flex flex-col gap-1">
+                      Adresse de la page RIS
+                      <input
+                        type="text"
+                        value={settings.liveRisUrl || ""}
+                        disabled={!canEdit}
+                        placeholder="https://live.ris-timing.be/funbe"
+                        onChange={(e) => pushSettings({ ...settings, liveRisUrl: e.target.value.trim() })}
+                        className="px-2 py-1.5 text-sm font-mono rounded bg-black/50 text-white placeholder-white/30 border border-white/20 focus:outline-none focus:border-white"
+                      />
+                    </label>
+                    <div className="text-white/70 text-[11px] leading-snug">
+                      <b>Une seule fois :</b> faites glisser le bouton bleu ci-dessous dans votre barre de
+                      favoris (Ctrl+Maj+B pour l'afficher).
+                      <br />
+                      <b>À chaque session :</b> cliquez « Ouvrir la page RIS », puis, dans l'onglet RIS qui
+                      s'ouvre, cliquez sur le favori « PitBoard ↔ RIS ». Un petit message « flux transmis »
+                      apparaît en bas à gauche de la page RIS. Laissez les deux onglets ouverts.
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <button
+                        type="button"
+                        disabled={!canEdit || !(settings.liveRisUrl || "").startsWith(RIS_ORIGIN)}
+                        onClick={() => window.open(settings.liveRisUrl, "pitboard-ris")}
+                        className="px-3 py-1 rounded font-bold text-xs bg-white text-black disabled:opacity-40"
+                        title={`L'adresse doit commencer par ${RIS_ORIGIN}`}
+                      >
+                        Ouvrir la page RIS
+                      </button>
+                      <a
+                        ref={(el) => {
+                          if (el) el.setAttribute("href", buildBookmarklet(window.location.origin));
+                        }}
+                        onClick={(e) => e.preventDefault()}
+                        draggable
+                        className="px-3 py-1 rounded font-bold text-xs bg-blue-600 text-white cursor-grab"
+                        title="Glissez ce bouton dans la barre de favoris"
+                      >
+                        PitBoard ↔ RIS
+                      </a>
+                    </div>
+                  </div>
+                )}
+                <label className="flex flex-col gap-1 text-white text-xs">
+                  uuid du flux{settings.liveSource === "page" ? " (rempli automatiquement)" : ""}
+                  <input
+                    type="text"
+                    value={settings.liveUuid || ""}
+                    disabled={!canEdit}
+                    placeholder="00000000-0000-0000-0000-000000000004"
+                    onChange={(e) => pushSettings({ ...settings, liveUuid: e.target.value.trim() })}
+                    className="px-2 py-1.5 text-sm font-mono rounded bg-black/50 text-white placeholder-white/30 border border-white/20 focus:outline-none focus:border-white"
+                  />
+                </label>
+                <label className="flex items-center gap-2 text-white text-xs">
+                  <input
+                    type="checkbox"
+                    checked={!!settings.liveFlagAuto}
+                    disabled={!canEdit}
+                    onChange={(e) => pushSettings({ ...settings, liveFlagAuto: e.target.checked })}
+                  />
+                  Drapeaux automatiques (vert / jaune)
+                </label>
+                <p className="text-white/50 text-[10px]">
+                  Un poste Admin doit rester ouvert : il lit le flux toutes les 3 s et le partage aux autres
+                  postes. Le rouge reste manuel. Un drapeau changé à la main reste prioritaire jusqu'à ce que
+                  le flux change lui-même.
+                </p>
+                {isAdmin && settings.liveEnabled && (
+                  <div className="text-[10px] font-mono">
+                    {!relayStatus && settings.liveSource === "page" && (
+                      <span className="text-white/60">
+                        En attente de la page RIS : ouvrez-la avec le bouton, puis cliquez sur le favori
+                        « PitBoard ↔ RIS ».
+                      </span>
+                    )}
+                    {!relayStatus && settings.liveSource !== "page" && (
+                      <span className="text-white/60">Relais : démarrage…</span>
+                    )}
+                    {relayStatus && relayStatus.ok && (
+                      <span className="text-green-400">
+                        Relais OK (
+                        {relayStatus.via === "page"
+                          ? "via la page RIS"
+                          : relayStatus.via === "proxy"
+                          ? "via relais Vercel"
+                          : "lecture directe"}
+                        ) —{" "}
+                        {relayStatus.nCars} voitures · statut {relayStatus.status || "?"} · piste{" "}
+                        {relayStatus.trackStateRaw || "(vide)"} · dernière donnée il y a{" "}
+                        {Math.max(0, Math.round((now - relayStatus.generatedAt) / 1000))} s
+                      </span>
+                    )}
+                    {relayStatus && !relayStatus.ok && (
+                      <span className="text-red-400">Relais en erreur : {relayStatus.error}</span>
+                    )}
+                  </div>
+                )}
+                {isAdmin && settings.liveEnabled && (
+                  <div className="flex flex-col gap-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const raw = lastRawRef.current;
+                        if (!raw) {
+                          setSampleText("Aucun flux reçu pour l'instant sur ce poste.");
+                          return;
+                        }
+                        const cut = (v, d) => {
+                          if (Array.isArray(v)) return v.slice(0, d === 0 ? 3 : 2).map((x) => cut(x, d + 1));
+                          if (v && typeof v === "object") {
+                            const o = {};
+                            Object.keys(v).forEach((k) => (o[k] = cut(v[k], d + 1)));
+                            return o;
+                          }
+                          return v;
+                        };
+                        const txt = JSON.stringify(cut(raw, 0), null, 1).slice(0, 12000);
+                        setSampleText(txt);
+                        try {
+                          navigator.clipboard && navigator.clipboard.writeText(txt);
+                        } catch (e) {}
+                      }}
+                      className="self-start px-2 py-1 rounded bg-black/50 text-white text-[10px] border border-white/20 hover:bg-black/70"
+                    >
+                      Copier un échantillon du flux (diagnostic)
+                    </button>
+                    {sampleText && (
+                      <textarea
+                        readOnly
+                        value={sampleText}
+                        rows={6}
+                        onFocus={(e) => e.target.select()}
+                        className="w-full text-[10px] font-mono rounded bg-black/60 text-white border border-white/20 p-1"
+                      />
+                    )}
+                  </div>
+                )}
+                {!isAdmin && settings.liveEnabled && (
+                  <div className="text-[10px] text-white/60 font-mono">
+                    {!liveInfo
+                      ? "Aucune donnée reçue : ouvrez l'application sur un poste Admin."
+                      : liveInfo.relayAlive
+                      ? `Relais Admin actif (dernier envoi il y a ${liveInfo.relayAgeSec} s).`
+                      : `Relais Admin arrêté (dernier envoi il y a ${liveInfo.relayAgeSec} s).`}
+                  </div>
+                )}
               </div>
               <label className="flex flex-col gap-1 text-white text-xs">
                 Capacité réservoir (litres)
@@ -2495,6 +3917,36 @@ export default function PitBoard() {
           </div>
         )}
 
+        {/* DIRECTION DE COURSE (RC) : grand, en rouge */}
+        {/* team manager : les messages visant sa voiture sont déjà dans la tuile, on ne garde ici que les messages généraux (sans numéro) */}
+        {(myCar ? rcMessages.filter((m) => m.nums.length === 0) : rcMessages).length > 0 && (
+          <div className="mb-3 flex flex-col gap-2">
+            {(myCar ? rcMessages.filter((m) => m.nums.length === 0) : rcMessages).map((m) => (
+              <div
+                key={m.key}
+                className="rounded-xl px-4 py-3 flex items-start gap-3 shadow-lg animate-pulse"
+                style={{ backgroundColor: "#c40000", border: "3px solid #ff4040", animationIterationCount: 3 }}
+              >
+                <AlertTriangle size={30} color="#fff" className="flex-shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                  <div className="text-white/80 text-[11px] font-bold uppercase tracking-widest">
+                    Direction de course (RC)
+                    {m.nums.length > 0 && <> · voiture{m.nums.length > 1 ? "s" : ""} {m.nums.map((n) => "#" + n).join(" ")}</>}
+                  </div>
+                  <div className="text-white text-xl sm:text-2xl font-black leading-snug break-words">{m.message}</div>
+                </div>
+                <button
+                  onClick={() => setRcDismissed((prev) => new Set(prev).add(m.key))}
+                  className="text-white/80 hover:text-white flex-shrink-0"
+                  title="Masquer ce message"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* GRILLE DE DÉPART */}
         <div className="mb-4">
           <h2 className="text-white font-bold tracking-wide uppercase text-xs mb-2 flex items-center gap-2">
@@ -2508,32 +3960,126 @@ export default function PitBoard() {
             </div>
           ) : (
             <div className="flex flex-col gap-3">
-              {chunkArray(carTiles, 3).map((row, rowIdx) => (
-                <div
-                  key={rowIdx}
-                  className="grid grid-cols-3 gap-3"
-                  style={{ transform: rowIdx % 2 === 1 ? "translateX(22px)" : "none" }}
-                >
-                  {row.map(({ car, call }) => {
+              {(() => {
+                const renderTile = ({ car, call }) => {
                     const expanded = expandedTiles.has(car.id);
+                    // vue récap (admin) : tuile compacte tant qu'elle n'est pas ouverte
+                    const compact = recapView && !expanded;
+                    const ds = driverStatsFor(car);
                     const d = call ? deriveCall(call, now) : null;
                     const overMax = d && d.phase === "instand" && d.pitElapsed >= AUTO_REMOVE_AFTER_PIT_SEC - 30;
                     const nearEnd = d && d.phase === "countdown" && d.remaining <= 30 && d.remaining > 0;
                     const ringColor = overMax ? "#ff3b3b" : nearEnd ? "#ffd400" : "rgba(0,0,0,0.35)";
+                    const callControls = call ? (
+                                <>
+                                  {d.phase === "countdown" ? (
+                                    <>
+                                      <div className="flex gap-1.5 flex-wrap">
+                                        <button
+                                          onClick={() => {
+                                            if (!canEdit) return;
+                                            forceArrival(call.id);
+                                            if (soundOnRef.current) {
+                                              speakTrackPoint(audioCtxRef, call.numero, "Entrée");
+                                            }
+                                          }}
+                                          disabled={!canEdit}
+                                          className="flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed"
+                                          style={{ backgroundColor: car.couleur1, color: "#111" }}
+                                        >
+                                          <PlayCircle size={13} /> Entrée
+                                        </button>
+                                      </div>
+                                      <div className="flex gap-1 flex-wrap">
+                                        {TRACK_POINTS.map((p) => (
+                                          <button
+                                            key={p.name}
+                                            onClick={() => {
+                                              adjustCallTime(call.id, p.sec);
+                                              if (soundOnRef.current) {
+                                                speakTrackPoint(audioCtxRef, call.numero, p.name, p.sec);
+                                              }
+                                            }}
+                                            title={`Ajuster à ${fmtTime(p.sec)}`}
+                                            className="px-2 py-0.5 rounded-full text-[10px] font-semibold text-white/80 bg-white/5 border border-white/15 hover:bg-white/15 hover:text-white transition-colors"
+                                          >
+                                            {p.name} <span className="text-white/45">{fmtTime(p.sec)}</span>
+                                          </button>
+                                        ))}
+                                      </div>
+                                    </>
+                                  ) : confirmExitId === call.id ? (
+                                    <div className="flex items-center gap-2">
+                                      <span className="text-white text-xs font-bold">Confirmer ?</span>
+                                      <button
+                                        onClick={() => {
+                                          removeCall(call.id);
+                                          setConfirmExitId(null);
+                                        }}
+                                        className="flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold text-white bg-red-600 hover:bg-red-500 transition-colors"
+                                      >
+                                        <CheckCircle2 size={13} /> Oui, elle sort
+                                      </button>
+                                      <button
+                                        onClick={() => setConfirmExitId(null)}
+                                        className="flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold text-white/80 bg-white/5 border border-white/15 hover:bg-white/15 hover:text-white transition-colors"
+                                      >
+                                        Annuler
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <button
+                                      onClick={() => canEdit && setConfirmExitId(call.id)}
+                                      disabled={!canEdit}
+                                      className="self-start flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold text-white/85 bg-white/5 border border-white/15 hover:bg-white/15 hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                    >
+                                      <CheckCircle2 size={13} /> Voiture quitte les stands
+                                    </button>
+                                  )}
+                                  {call.tasks && call.tasks.length > 0 && (
+                                    <div className="flex flex-wrap gap-1">
+                                      {call.tasks.slice(0, 6).map((t, i) => (
+                                        <span
+                                          key={i}
+                                          className="text-[11px] font-semibold text-white bg-white/10 rounded-full px-2 py-0.5"
+                                        >
+                                          {t}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  )}
+                                  <button
+                                    onClick={() => removeCall(call.id)}
+                                    className="self-start flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold text-white/50 hover:text-white"
+                                  >
+                                    <X size={11} /> Annuler l'annonce
+                                  </button>
+                                </>
+                    ) : null;
+                    const recsT = techChecks[car.id] || [];
+                    const lastRecT = recsT[recsT.length - 1];
+                    const stT = stints[car.id];
+                    // contrôle technique à compléter : la voiture a quitté les stands et la fiche n'est pas encore "envoyée"
+                    const techPending = !!(myCar && lastRecT && stT && stT.lastExitAt && stT.lastExitAt > lastRecT.ts && techAck[car.id] !== lastRecT.id);
                     return (
                       <div
                         key={car.id}
                         ref={(el) => {
                           if (el) tileNodesRef.current[car.id] = el;
                         }}
-                        className="rounded-2xl p-2 shadow-lg transition-shadow"
+                        className={`rounded-2xl shadow-lg transition-shadow ${compact ? "p-1.5" : "p-2"}`}
                         style={{
                           backgroundColor: "#0a0a0a",
                           backgroundImage: `repeating-linear-gradient(45deg, ${car.couleur1} 0px, ${car.couleur1} 14px, rgba(10,10,10,1) 14px, rgba(10,10,10,1) 28px)`,
                           boxShadow: `0 0 0 2.5px ${ringColor}, 0 6px 16px rgba(0,0,0,0.35)`,
+                          gridColumn: recapView && expanded ? "span 2" : undefined,
                         }}
                       >
-                        <div className="rounded-[13px] bg-neutral-900/95 backdrop-blur-sm p-3 flex flex-col gap-2">
+                        <div
+                          className={`rounded-[13px] bg-neutral-900/95 backdrop-blur-sm flex flex-col ${
+                            compact ? "p-2 gap-1" : "p-3 gap-2"
+                          }`}
+                        >
                           {/* EN-TÊTE cliquable : agrandit / réduit l'encart */}
                           <button
                             onClick={() => toggleExpand(car.id)}
@@ -2553,6 +4099,28 @@ export default function PitBoard() {
                               {car.pilote && (
                                 <div className="text-white/50 text-[11px] mt-0.5 truncate">{car.pilote}</div>
                               )}
+                              {ds && ds.curDriver && (
+                                <div className="text-sm font-black text-white mt-0.5 truncate">
+                                  {driverName(ds.curDriver) || "Pilote sans nom"}
+                                  {!ds.cur.confirmed && (
+                                    <span className="text-amber-400" title="Pilote prévu, à confirmer">
+                                      {" "}?
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+                              {(() => {
+                                const live = liveFor(car);
+                                if (!live || (!live.pos && live.laps == null)) return null;
+                                return (
+                                  <div className="text-[11px] font-black font-mono text-white/80 mt-0.5">
+                                    P{live.pos || "-"}
+                                    {live.laps != null && (
+                                      <span className="text-white/50 font-semibold"> · {live.laps} tours</span>
+                                    )}
+                                  </div>
+                                );
+                              })()}
                             </div>
                             {call && call.fuel && (
                               <span
@@ -2566,10 +4134,38 @@ export default function PitBoard() {
                                 ⛽ {call.fuel === "oui" ? "Oui" : "Non"}
                               </span>
                             )}
-                            {!call && (
+                            {!call && !liveFor(car) && (
                               <span className="text-white/40 text-[10px] font-bold">P{car.classement || "-"}</span>
                             )}
                           </button>
+
+                          {/* team manager : boutons raccourcis (fenêtres) */}
+                          {myCar && !compact && (
+                            <div className="grid grid-cols-3 gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => setModal("announce")}
+                                className="rounded-lg px-2 py-2 text-[11px] font-black uppercase tracking-wide bg-white text-black hover:bg-white/90"
+                              >
+                                📣 Annoncer un arrêt
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setModal("message")}
+                                className="rounded-lg px-2 py-2 text-[11px] font-black uppercase tracking-wide bg-white/15 text-white hover:bg-white/25"
+                              >
+                                ✉ Message
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setModal("tech")}
+                                className="rounded-lg px-2 py-2 text-[11px] font-black uppercase tracking-wide bg-white/15 text-white hover:bg-white/25"
+                                style={techPending ? { animation: "pbblink 0.9s infinite" } : undefined}
+                              >
+                                🔧 Contrôle technique{techPending ? " !" : ""}
+                              </button>
+                            </div>
+                          )}
 
                           {/* APERÇU toujours visible */}
                           {call ? (
@@ -2586,31 +4182,113 @@ export default function PitBoard() {
                               </div>
                             </div>
                           ) : (
-                            !expanded && (
+                            !expanded &&
+                            !recapView &&
+                            !myCar && (
                               <div className="text-center text-white/40 text-xs py-2">
                                 Cliquer pour annoncer un arrêt
                               </div>
                             )
                           )}
 
+                          {/* team manager : Entrée / points sur le circuit / quitte les stands, sans ouvrir la tuile */}
+                          {myCar && !compact && callControls && (
+                            <div className="flex flex-col gap-1.5 rounded bg-white/5 px-2 py-1.5">{callControls}</div>
+                          )}
+
+                          {/* PILOTE DU RELAIS + temps de roulage cumulé (toujours visible, sauf en vue récap) */}
+                          {ds && !compact && (
+                            <DriverStrip
+                              ds={ds}
+                              canEdit={canEdit}
+                              onSet={(n, driverId) => confirmRelayDriver(car.id, n, driverId)}
+                            />
+                          )}
+
+                          {/* team manager : informations de tous les pilotes dans un menu déroulant */}
+                          {myCar && ds && !compact && (
+                            <div className="flex flex-col gap-1">
+                              <button
+                                type="button"
+                                onClick={() => setDriversOpen((o) => !o)}
+                                className="flex items-center justify-between rounded bg-white/10 hover:bg-white/15 px-2 py-1 text-left text-[10px] font-black uppercase tracking-wide text-white/80"
+                              >
+                                <span>{driversOpen ? "▾" : "▸"} Pilotes : temps de roulage et meilleurs temps ({ds.cfg.list.length})</span>
+                              </button>
+                              {driversOpen && <DriversTimes ds={ds} hasLive={!!liveFor(car)} />}
+                            </div>
+                          )}
+
+                          {/* RC visant cette voiture */}
+                          {rcForCar(car).map((m) => (
+                            <div
+                              key={m.key}
+                              className="rounded px-2 py-1 text-white font-black text-xs leading-snug"
+                              style={{ backgroundColor: "#c40000", border: "1px solid #ff4040" }}
+                            >
+                              ⚠ RC : {m.message}
+                            </div>
+                          ))}
+
+                          {/* LIVE RIS : temps de course, intermédiaires, voisins au classement */}
+                          {!compact && liveInfo && liveInfo.relayAlive && liveFor(car) && (
+                            <>
+                              <LiveBlock
+                                info={liveInfo}
+                                live={liveFor(car)}
+                                num={normalizeCarNumber(car.numero)}
+                                now={now}
+                                showTable={expanded || !!myCar}
+                                part={myCar ? "stats" : "all"}
+                                driverBest={
+                                  ds && ds.curDriver
+                                    ? { name: driverName(ds.curDriver), best: ds.cfg.best[ds.curDriver.id] }
+                                    : null
+                                }
+                              />
+                              {/* team manager : alertes dans la tuile sur écran moyen, dans leur propre colonne sur grand écran */}
+                              {myCar && (
+                                <div className="xl:hidden">
+                                  <LiveBlock info={liveInfo} live={liveFor(car)} num={normalizeCarNumber(car.numero)} now={now} part="alerts" />
+                                </div>
+                              )}
+                            </>
+                          )}
+
                           {/* CONTENU AGRANDI */}
                           {expanded && (
                             <div className="flex flex-col gap-2 pt-1 border-t border-white/10">
+                              {/* TEMPS DE ROULAGE PAR PILOTE */}
+                              {ds && (
+                                <div className="flex flex-col gap-0.5">
+                                  <div className="text-white/50 uppercase tracking-widest font-bold text-[9px]">
+                                    Temps de roulage par pilote
+                                  </div>
+                                  <DriversTimes ds={ds} hasLive={!!liveFor(car)} />
+                                </div>
+                              )}
                               {/* CLASSEMENT GÉNÉRAL : éditable directement dans l'encart */}
                               <div className="flex items-center gap-2">
                                 <label className="text-white/60 text-[10px] uppercase tracking-widest whitespace-nowrap">
                                   Classement général
                                 </label>
-                                <input
-                                  type="number"
-                                  min="1"
-                                  value={car.classement || ""}
-                                  onClick={(e) => e.stopPropagation()}
-                                  onChange={(e) =>
-                                    updateCar(car.id, "classement", Number(e.target.value) || 0)
-                                  }
-                                  className="w-16 px-2 py-0.5 text-sm rounded bg-black/50 text-white border border-white/20 focus:outline-none focus:border-white"
-                                />
+                                {liveFor(car) && liveFor(car).pos ? (
+                                  <span className="text-sm font-black font-mono text-white">
+                                    P{liveFor(car).pos}{" "}
+                                    <span className="text-white/50 text-[10px] font-semibold">(live)</span>
+                                  </span>
+                                ) : (
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    value={car.classement || ""}
+                                    onClick={(e) => e.stopPropagation()}
+                                    onChange={(e) =>
+                                      updateCar(car.id, "classement", Number(e.target.value) || 0)
+                                    }
+                                    className="w-16 px-2 py-0.5 text-sm rounded bg-black/50 text-white border border-white/20 focus:outline-none focus:border-white"
+                                  />
+                                )}
                               </div>
                               {/* RELAIS : chrono en cours + historique */}
                               {(() => {
@@ -2809,90 +4487,7 @@ export default function PitBoard() {
                                 );
                               })()}
                               {call ? (
-                                <>
-                                  {d.phase === "countdown" ? (
-                                    <>
-                                      <div className="flex gap-1.5 flex-wrap">
-                                        <button
-                                          onClick={() => {
-                                            if (!canEdit) return;
-                                            forceArrival(call.id);
-                                            if (soundOnRef.current) {
-                                              speakTrackPoint(audioCtxRef, call.numero, "Entrée");
-                                            }
-                                          }}
-                                          disabled={!canEdit}
-                                          className="flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold disabled:opacity-40 disabled:cursor-not-allowed"
-                                          style={{ backgroundColor: car.couleur1, color: "#111" }}
-                                        >
-                                          <PlayCircle size={13} /> Entrée
-                                        </button>
-                                      </div>
-                                      <div className="flex gap-1 flex-wrap">
-                                        {TRACK_POINTS.map((p) => (
-                                          <button
-                                            key={p.name}
-                                            onClick={() => {
-                                              adjustCallTime(call.id, p.sec);
-                                              if (soundOnRef.current) {
-                                                speakTrackPoint(audioCtxRef, call.numero, p.name, p.sec);
-                                              }
-                                            }}
-                                            title={`Ajuster à ${fmtTime(p.sec)}`}
-                                            className="px-2 py-0.5 rounded-full text-[10px] font-semibold text-white/80 bg-white/5 border border-white/15 hover:bg-white/15 hover:text-white transition-colors"
-                                          >
-                                            {p.name} <span className="text-white/45">{fmtTime(p.sec)}</span>
-                                          </button>
-                                        ))}
-                                      </div>
-                                    </>
-                                  ) : confirmExitId === call.id ? (
-                                    <div className="flex items-center gap-2">
-                                      <span className="text-white text-xs font-bold">Confirmer ?</span>
-                                      <button
-                                        onClick={() => {
-                                          removeCall(call.id);
-                                          setConfirmExitId(null);
-                                        }}
-                                        className="flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold text-white bg-red-600 hover:bg-red-500 transition-colors"
-                                      >
-                                        <CheckCircle2 size={13} /> Oui, elle sort
-                                      </button>
-                                      <button
-                                        onClick={() => setConfirmExitId(null)}
-                                        className="flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold text-white/80 bg-white/5 border border-white/15 hover:bg-white/15 hover:text-white transition-colors"
-                                      >
-                                        Annuler
-                                      </button>
-                                    </div>
-                                  ) : (
-                                    <button
-                                      onClick={() => canEdit && setConfirmExitId(call.id)}
-                                      disabled={!canEdit}
-                                      className="self-start flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold text-white/85 bg-white/5 border border-white/15 hover:bg-white/15 hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                                    >
-                                      <CheckCircle2 size={13} /> Voiture quitte les stands
-                                    </button>
-                                  )}
-                                  {call.tasks && call.tasks.length > 0 && (
-                                    <div className="flex flex-wrap gap-1">
-                                      {call.tasks.slice(0, 6).map((t, i) => (
-                                        <span
-                                          key={i}
-                                          className="text-[11px] font-semibold text-white bg-white/10 rounded-full px-2 py-0.5"
-                                        >
-                                          {t}
-                                        </span>
-                                      ))}
-                                    </div>
-                                  )}
-                                  <button
-                                    onClick={() => removeCall(call.id)}
-                                    className="self-start flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold text-white/50 hover:text-white"
-                                  >
-                                    <X size={11} /> Annuler l'annonce
-                                  </button>
-                                </>
+                                myCar ? null : callControls
                               ) : (
                                 <div className="text-center text-white/50 text-xs py-2">
                                   Utilisez le formulaire "Annoncer un arrêt" ci-dessus pour cette voiture.
@@ -2900,18 +4495,155 @@ export default function PitBoard() {
                               )}
                             </div>
                           )}
+
+                          {/* HISTORIQUE RC de cette voiture (+ messages généraux), heure réelle de parution */}
+                          {(() => {
+                            const log = rcLogForCar(car);
+                            if (log.length === 0) return null;
+                            const shown = compact ? log.slice(0, 1) : log;
+                            return (
+                              <div
+                                className="flex flex-col gap-0.5 pt-1 border-t border-white/10 overflow-y-auto"
+                                style={{ maxHeight: compact ? undefined : 90 }}
+                              >
+                                {shown.map((l, i) => (
+                                  <div key={l.t + "-" + i} className="text-[10px] leading-snug font-semibold" style={{ color: "#ff5a5a" }}>
+                                    <span className="font-mono">{new Date(l.t).toLocaleTimeString("fr-BE")}</span> · RC : {l.m}
+                                  </div>
+                                ))}
+                              </div>
+                            );
+                          })()}
                         </div>
                       </div>
                     );
-                  })}
-                </div>
-              ))}
+                };
+                // admin : tableau récapitulatif, toutes les tuiles sur une seule grille compacte
+                if (recapView) {
+                  return (
+                    <div
+                      className="grid gap-2"
+                      style={{ gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))" }}
+                    >
+                      {carTiles.map((t) => renderTile(t))}
+                    </div>
+                  );
+                }
+                // team manager : une seule tuile, centrée
+                if (myCar) {
+                  const vurl = (settings.carVideos || {})[myCar.id];
+                  const hasVideo = typeof vurl === "string" && /^https?:\/\//i.test(vurl.trim());
+                  const myLive = liveInfo && liveInfo.relayAlive ? liveFor(myCar) : null;
+                  // jauge d'essence (tours restants) et temps du relais du pilote, en évidence au-dessus de la tuile
+                  const stM = stints[myCar.id];
+                  const callM = (carTiles[0] && carTiles[0].call) || null;
+                  const onTrackM = !!(stM && stM.lastExitAt && !(callM && callM.phase === "instand"));
+                  const fuelM = onTrackM ? computeLiveFuelEstimate(myCar.id, now) : null;
+                  const dsM = driverStatsFor(myCar);
+                  const relaySec = onTrackM ? (now - stM.lastExitAt) / 1000 : null;
+                  const fuelColor = fuelM && fuelM.calibrated ? (fuelM.status === "CRITICAL" ? "#ff3b3b" : fuelM.status === "WARNING" ? "#ffd400" : "#4ade80") : "#9ca3af";
+                  const lapsLeft = fuelM && fuelM.calibrated && settings.circuitLengthKm > 0 && fuelM.autonomyKm ? fuelM.autonomyKm / settings.circuitLengthKm : null;
+                  const topBar = (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-2">
+                      <div className="rounded-xl bg-black/70 border-2 px-3 py-1" style={{ borderColor: fuelColor }}>
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-white/70 text-[11px] font-black uppercase tracking-widest">⛽ Jauge d'essence</span>
+                          {fuelM && fuelM.calibrated && (
+                            <span className="font-mono text-sm font-black" style={{ color: fuelColor }}>
+                              {fuelM.fuelRemaining.toFixed(1)} L · {fuelM.pct.toFixed(0)} %
+                            </span>
+                          )}
+                        </div>
+                        {fuelM && fuelM.calibrated ? (
+                          <>
+                            <div className="h-2 rounded-full bg-white/15 overflow-hidden my-1">
+                              <div className="h-full rounded-full" style={{ width: `${Math.max(2, Math.min(100, fuelM.pct))}%`, backgroundColor: fuelColor }} />
+                            </div>
+                            <div className="flex items-baseline gap-2 text-white">
+                              <span className="font-black leading-none" style={{ fontSize: 26, color: fuelColor }}>
+                                {lapsLeft != null ? lapsLeft.toFixed(1) : fuelM.autonomyKm ? fuelM.autonomyKm.toFixed(0) : "?"}
+                              </span>
+                              <span className="text-sm font-bold">{lapsLeft != null ? "tours restants" : "km restants"}</span>
+                              <span className="ml-auto font-mono text-sm text-white/70">{fuelM.autonomyMin ? fmtTimeHMS(fuelM.autonomyMin * 60) : ""}</span>
+                            </div>
+                          </>
+                        ) : (
+                          <div className="text-white/50 text-xs py-1">
+                            {onTrackM ? "Calibration insuffisante : enregistrez un ravitaillement dans le contrôle technique." : "Voiture au stand : la jauge repart à la sortie."}
+                          </div>
+                        )}
+                      </div>
+                      <div className="rounded-xl bg-black/70 border-2 border-white/40 px-3 py-1">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-white/70 text-[11px] font-black uppercase tracking-widest">⏱ Relais du pilote</span>
+                          <span className="text-white/60 text-xs font-bold">Relais {((stM && stM.log) || []).length + 1}</span>
+                        </div>
+                        <div className="flex items-baseline gap-3 text-white">
+                          <span className="font-mono font-black leading-none" style={{ fontSize: 26 }}>
+                            {relaySec != null ? fmtTimeHMS(relaySec) : "--:--:--"}
+                          </span>
+                          <span className="text-base font-black truncate">
+                            {dsM && dsM.curDriver ? driverName(dsM.curDriver) || "Pilote sans nom" : ""}
+                          </span>
+                        </div>
+                        {dsM && dsM.curDriver && dsM.totals[dsM.curDriver.id] && (
+                          <div className="text-white/60 text-[11px] font-mono">
+                            Total roulage pilote : {fmtTimeHMS(dsM.totals[dsM.curDriver.id].total)}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                  return (
+                    <>
+                    {topBar}
+                    <div className="w-full grid gap-3 items-start grid-cols-1 lg:grid-cols-[58%_minmax(0,1fr)] xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)_minmax(0,1.1fr)]">
+                      <div className="w-full order-2 lg:order-1">{carTiles.map((t) => renderTile(t))}</div>
+                      {myLive && (
+                        <div className="hidden xl:block order-2 sticky top-0">
+                          <LiveBlock info={liveInfo} live={myLive} num={normalizeCarNumber(myCar.numero)} now={now} part="alerts" big />
+                        </div>
+                      )}
+                      <div className="order-1 lg:order-3 max-lg:contents lg:sticky lg:top-0 lg:flex lg:flex-col lg:gap-2">
+                        {hasVideo && (
+                          <div className="w-full max-w-[460px] max-lg:max-w-[260px] max-lg:mx-auto max-lg:sticky max-lg:top-0 max-lg:z-30 max-lg:order-1 rounded-2xl bg-neutral-900/95 p-2 shadow-lg">
+                            <CarVideo url={vurl} always />
+                          </div>
+                        )}
+                        {myLive && (
+                          <div className="w-full max-lg:order-3">
+                            <LiveBlock
+                              info={liveInfo}
+                              live={myLive}
+                              num={normalizeCarNumber(myCar.numero)}
+                              now={now}
+                              showTable
+                              part="table"
+                            />
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    </>
+                  );
+                }
+
+                return chunkArray(carTiles, 3).map((row, rowIdx) => (
+                  <div
+                    key={rowIdx}
+                    className="grid grid-cols-3 gap-3"
+                    style={{ transform: rowIdx % 2 === 1 ? "translateX(22px)" : "none" }}
+                  >
+                    {row.map((t) => renderTile(t))}
+                  </div>
+                ));
+              })()}
             </div>
           )}
 
-          {messages.length > 0 && (
+          {visibleMessages.length > 0 && (
             <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 mt-3">
-              {messages.map((m) => (
+              {visibleMessages.map((m) => (
                 <div
                   key={`msg-${m.id}`}
                   className="rounded-2xl p-2 shadow-lg"
@@ -2954,6 +4686,7 @@ export default function PitBoard() {
 
 
         {/* ANNONCER UN ARRÊT (fenêtre fixe) */}
+        <PanelHost modal={!!myCar} open={modal === "announce"} onClose={() => setModal(null)} title="Annoncer un arrêt">
         <div className="rounded-lg border-2 border-black/30 mb-4 p-3 bg-black/40">
           <h2 className="text-white font-bold tracking-wide uppercase text-xs mb-2 flex items-center gap-2">
             <Plus size={14} /> Annoncer un arrêt
@@ -3069,10 +4802,12 @@ export default function PitBoard() {
             </div>
           )}
         </div>
+        </PanelHost>
 
-        {advancedMode && (
+        {(advancedMode || !!myCar) && (
         <>
         {/* CONTRÔLE TECHNIQUE (fenêtre fixe, reste modifiable même après le départ de la voiture) */}
+        <PanelHost modal={!!myCar} open={modal === "tech"} onClose={() => setModal(null)} title="Contrôle technique">
         <div className="rounded-lg border-2 border-black/30 mb-4 p-3 bg-black/40">
           <h2 className="text-white font-bold tracking-wide uppercase text-xs mb-2 flex items-center gap-2">
             <Settings2 size={14} /> Contrôle technique
@@ -3322,12 +5057,23 @@ export default function PitBoard() {
                     {records.length} fiches enregistrées pour cette voiture depuis le début de l'événement.
                   </p>
                 )}
+                {myCar && (
+                  <button
+                    type="button"
+                    onClick={() => ackTech(car.id, record ? record.id : 0)}
+                    className="self-start px-5 py-2 rounded font-black uppercase tracking-wide text-sm bg-green-500 text-black hover:bg-green-400"
+                  >
+                    ✔ Envoyé
+                  </button>
+                )}
               </div>
             );
           })()}
         </div>
+        </PanelHost>
 
         {/* MESSAGE À L'ÉQUIPE */}
+        <PanelHost modal={!!myCar} open={modal === "message"} onClose={() => setModal(null)} title="Message à l'équipe">
         <div className="rounded-lg border-2 border-black/30 mb-4 p-3 bg-black/40">
           <button
             onClick={() => setShowMessageForm((s) => !s)}
@@ -3390,6 +5136,7 @@ export default function PitBoard() {
           </>
           )}
         </div>
+        </PanelHost>
         </>
         )}
 
@@ -3407,7 +5154,7 @@ export default function PitBoard() {
           {showSetup && (
             <div className="px-3 pb-3">
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                {cars.map((c) => (
+                {cars.filter((c) => role !== "manager" || c.id === myCarId).map((c) => (
                   <div
                     key={c.id}
                     className="rounded-md p-2 border border-white/20"
@@ -3416,7 +5163,7 @@ export default function PitBoard() {
                     }}
                   >
                     <div className="bg-black/60 rounded p-2 flex flex-col gap-1.5 relative">
-                      {c.id > 6 && (
+                      {c.id > 6 && role !== "manager" && (
                         <button
                           onClick={() => removeCarRow(c.id)}
                           className="absolute top-1 right-1 text-white/40 hover:text-white"
@@ -3432,6 +5179,7 @@ export default function PitBoard() {
                         type="text"
                         placeholder="N° voiture"
                         value={c.numero}
+                        disabled={role === "manager"}
                         onFocus={() => (editingSetupRef.current = true)}
                         onBlur={() => (editingSetupRef.current = false)}
                         onChange={(e) => updateCar(c.id, "numero", e.target.value)}
@@ -3455,6 +5203,41 @@ export default function PitBoard() {
                         onChange={(e) => updateCar(c.id, "team", e.target.value)}
                         className="w-full px-2 py-1 text-sm rounded bg-black/50 text-white placeholder-white/40 border border-white/20 focus:outline-none focus:border-white"
                       />
+                      {(() => {
+                        const dcfg = getCfg(settings.drivers, c.id);
+                        const st = stints[c.id] || { lastExitAt: null, log: [] };
+                        const open = openDriverCars.has(c.id);
+                        return (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setOpenDriverCars((prev) => {
+                                  const next = new Set(prev);
+                                  if (next.has(c.id)) next.delete(c.id);
+                                  else next.add(c.id);
+                                  return next;
+                                })
+                              }
+                              className="flex items-center justify-between px-2 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-xs font-bold"
+                            >
+                              <span>
+                                Pilotes et ordre des relais ({dcfg.list.length}/{MAX_DRIVERS})
+                              </span>
+                              <span className="text-white/60">{open ? "▲" : "▼"}</span>
+                            </button>
+                            {open && (
+                              <DriversEditor
+                                cfg={dcfg}
+                                currentN={(st.log || []).length + 1}
+                                drivenN={(st.log || []).length + (st.lastExitAt ? 1 : 0)}
+                                canEdit={canEdit}
+                                onChange={(next) => pushDriversCfg(c.id, next)}
+                              />
+                            )}
+                          </>
+                        );
+                      })()}
                       {settings.eventType === "course" && (
                         <div className="flex items-center gap-2">
                           <label className="text-white/60 text-[10px] uppercase tracking-widest whitespace-nowrap">
@@ -3472,6 +5255,25 @@ export default function PitBoard() {
                           />
                         </div>
                       )}
+                      <div className="flex items-center gap-2">
+                        <label className="text-white/60 text-[10px] uppercase tracking-widest whitespace-nowrap">
+                          Lien vidéo MyRacesLive
+                        </label>
+                        <input
+                          type="url"
+                          placeholder="https://…"
+                          value={(settings.carVideos || {})[c.id] || ""}
+                          onFocus={() => (editingSetupRef.current = true)}
+                          onBlur={() => (editingSetupRef.current = false)}
+                          onChange={(e) =>
+                            pushSettings({
+                              ...settings,
+                              carVideos: { ...(settings.carVideos || {}), [c.id]: e.target.value.trim() },
+                            })
+                          }
+                          className="flex-1 min-w-0 px-2 py-0.5 text-sm rounded bg-black/50 text-white border border-white/20 focus:outline-none focus:border-white"
+                        />
+                      </div>
                       <div className="flex items-center gap-2">
                         <label className="text-white/60 text-[10px] uppercase tracking-widest">
                           Couleur 1
@@ -3496,6 +5298,7 @@ export default function PitBoard() {
                   </div>
                 ))}
               </div>
+              {role !== "manager" && (
               <button
                 type="button"
                 onClick={addCarRow}
@@ -3503,6 +5306,7 @@ export default function PitBoard() {
               >
                 <Plus size={13} /> Ajouter une voiture
               </button>
+              )}
               <p className="text-white/50 text-[10px] mt-2">
                 Astuce : chaque team manager peut renseigner uniquement la ligne de sa propre
                 voiture — les autres restent gérées par leurs collègues, tout se synchronise
