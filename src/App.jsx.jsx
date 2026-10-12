@@ -4272,7 +4272,7 @@ export default function PitBoard() {
                           {expanded && (
                             <div className="flex flex-col gap-2 pt-1 border-t border-white/10">
                               {/* TEMPS DE ROULAGE PAR PILOTE */}
-                              {ds && (
+                              {ds && !myCar && (
                                 <div className="flex flex-col gap-0.5">
                                   <div className="text-white/50 uppercase tracking-widest font-bold text-[9px]">
                                     Temps de roulage par pilote
@@ -4281,7 +4281,7 @@ export default function PitBoard() {
                                 </div>
                               )}
                               {/* CLASSEMENT GÉNÉRAL : éditable directement dans l'encart */}
-                              <div className="flex items-center gap-2">
+                              <div className={`items-center gap-2 ${myCar && liveFor(car) && liveFor(car).pos ? "hidden" : "flex"}`}>
                                 <label className="text-white/60 text-[10px] uppercase tracking-widest whitespace-nowrap">
                                   Classement général
                                 </label>
@@ -4313,12 +4313,12 @@ export default function PitBoard() {
                                 );
                                 return (
                                   <div className="text-[10px] text-white/70 flex flex-col gap-1">
-                                    {st.lastExitAt && !call && (
+                                    {st.lastExitAt && !call && !myCar && (
                                       <div className="font-mono font-bold text-white">
                                         Durée du relais : {fmtTimeHMS((now - st.lastExitAt) / 1000)}
                                       </div>
                                     )}
-                                    {st.lastExitAt && !call && (() => {
+                                    {st.lastExitAt && !call && !myCar && (() => {
                                       const fuel = computeLiveFuelEstimate(car.id, now);
                                       if (!fuel) return null;
                                       if (!fuel.calibrated) {
@@ -4501,7 +4501,7 @@ export default function PitBoard() {
                               })()}
                               {call ? (
                                 myCar ? null : callControls
-                              ) : (
+                              ) : myCar ? null : (
                                 <div className="text-center text-white/50 text-xs py-2">
                                   Utilisez le formulaire "Annoncer un arrêt" ci-dessus pour cette voiture.
                                 </div>
