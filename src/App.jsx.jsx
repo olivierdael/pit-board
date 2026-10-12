@@ -625,6 +625,53 @@ function CarVideo({ url, always }) {
   );
 }
 
+// Team manager : ajuste automatiquement la taille de l'écran pour que tout tienne dans la fenêtre (16/9), sans défilement.
+// Le contenu est réduit uniquement si nécessaire (jamais agrandi) ; sur téléphone / petite largeur, rien n'est modifié.
+function FitToScreen({ children, reserve = 150, min = 0.45 }) {
+  const outer = useRef(null);
+  const inner = useRef(null);
+  const [fit, setFit] = useState({ s: 1, h: null });
+  useLayoutEffect(() => {
+    function recompute() {
+      const o = outer.current;
+      const i = inner.current;
+      if (!o || !i) return;
+      if (window.innerWidth < 1024) {
+        setFit((f) => (f.s === 1 && f.h === null ? f : { s: 1, h: null }));
+        return;
+      }
+      const natural = i.offsetHeight; // hauteur réelle du contenu (non affectée par la réduction)
+      if (!natural) return;
+      const top = o.getBoundingClientRect().top + window.scrollY;
+      const avail = window.innerHeight - top - reserve;
+      let s = Math.max(min, Math.min(1, avail / natural));
+      s = Math.floor(s * 50) / 50; // pas de 2 % : évite les oscillations
+      setFit((f) => (Math.abs(f.s - s) < 0.019 && f.h !== null ? f : { s, h: Math.ceil(natural * s) }));
+    }
+    recompute();
+    window.addEventListener("resize", recompute);
+    let ro = null;
+    if (typeof ResizeObserver !== "undefined" && inner.current) {
+      ro = new ResizeObserver(recompute);
+      ro.observe(inner.current);
+    }
+    return () => {
+      window.removeEventListener("resize", recompute);
+      if (ro) ro.disconnect();
+    };
+  }, [reserve, min]);
+  return (
+    <div ref={outer} className="w-full" style={fit.h != null && fit.s < 1 ? { height: fit.h, overflow: "hidden" } : undefined}>
+      <div
+        ref={inner}
+        style={fit.s < 1 ? { transform: `scale(${fit.s})`, transformOrigin: "top left", width: `${100 / fit.s}%` } : undefined}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
 // Fenêtre (team manager) : la fenêtre s'ouvre en grand par-dessus l'écran ; pour les autres rôles le panneau reste affiché en place.
 function PanelHost({ modal, open, onClose, title, children }) {
   if (!modal) return children;
@@ -998,10 +1045,10 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", 
                         </button>
                         {open && (
                           <div className="flex flex-col gap-1">
-                            {g.rows.slice(0, 6).map(g.render)}
-                            {g.rows.length > 6 && (
+                            {g.rows.slice(0, big ? 3 : 6).map(g.render)}
+                            {g.rows.length > (big ? 3 : 6) && (
                               <div className="text-white/50 font-sans" style={{ fontSize: fs(10) }}>
-                                + {g.rows.length - 6} autres voitures plus lointaines
+                                + {g.rows.length - (big ? 3 : 6)} autres voitures plus lointaines
                               </div>
                             )}
                           </div>
@@ -4630,7 +4677,7 @@ export default function PitBoard() {
                     </div>
                   );
                   return (
-                    <>
+                    <FitToScreen>
                     {topBar}
                     <div className="w-full grid gap-3 items-start grid-cols-1 lg:grid-cols-[58%_minmax(0,1fr)] xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)_minmax(0,1.1fr)]">
                       <div className="w-full order-2 lg:order-1">{carTiles.map((t) => renderTile(t))}</div>
@@ -4640,9 +4687,15 @@ export default function PitBoard() {
                         </div>
                       )}
                       <div className="order-1 lg:order-3 max-lg:contents lg:sticky lg:top-0 lg:flex lg:flex-col lg:gap-2">
-                        {hasVideo && (
+                        {hasVideo ? (
                           <div className="w-full max-w-[460px] max-lg:max-w-[260px] max-lg:mx-auto max-lg:sticky max-lg:top-0 max-lg:z-30 max-lg:order-1 rounded-2xl bg-neutral-900/95 p-2 shadow-lg">
                             <CarVideo url={vurl} always />
+                          </div>
+                        ) : (
+                          <div className="max-lg:hidden w-full max-w-[460px] rounded-2xl bg-neutral-900/70 border border-white/15 p-2 shadow-lg">
+                            <div className="w-full flex items-center justify-center text-center text-white/45 text-xs font-semibold px-4" style={{ aspectRatio: "16 / 9" }}>
+                              Fenêtre vidéo vide : ajoutez le lien MyRacesLive dans « Configuration des voitures »
+                            </div>
                           </div>
                         )}
                         {myLive && (
@@ -4659,7 +4712,7 @@ export default function PitBoard() {
                         )}
                       </div>
                     </div>
-                    </>
+                    </FitToScreen>
                   );
                 }
 
