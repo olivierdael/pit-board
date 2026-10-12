@@ -1021,7 +1021,7 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", 
 }
 
 // bandeau de la tuile : pilote du relais, confirmation, temps de roulage cumulé (vert / jaune)
-function DriverStrip({ ds, canEdit, onSet }) {
+function DriverStrip({ ds, canEdit, onSet, hideTotals }) {
   const [changing, setChanging] = useState(false);
   const { cfg, n, onTrack, cur, curDriver, prevId, totals } = ds;
   const tot = curDriver ? totals[curDriver.id] : null;
@@ -1037,7 +1037,7 @@ function DriverStrip({ ds, canEdit, onSet }) {
           Relais {n} {onTrack ? "en cours" : "à venir"}
         </span>
       </div>
-      {tot && (
+      {tot && !hideTotals && (
         <div className="font-mono text-white/80">
           Roulage {fmtTimeHMS(tot.total)}{" "}
           <span className="text-white/50">
@@ -2446,7 +2446,10 @@ export default function PitBoard() {
           // pour ne pas fausser la calibration vert/jaune
           const idleLitres = (runIdleSec / 3600) * settings.idleConsoLh;
           const litresForDistance = Math.max(0, litres - idleLitres);
-          if (runDistGreen + runDistYellow > 0) {
+          // garde-fou : une consommation hors 3–80 L/100 km vient d'une saisie ou d'un relais incohérent -> ignorée
+          const dKm = runDistGreen + runDistYellow;
+          const c100 = dKm > 0 ? (litresForDistance / dKm) * 100 : 0;
+          if (dKm > 0 && c100 >= 3 && c100 <= 80) {
             samples.push({ distGreen: runDistGreen, distYellow: runDistYellow, litres: litresForDistance });
           }
         }
@@ -3918,10 +3921,10 @@ export default function PitBoard() {
         )}
 
         {/* DIRECTION DE COURSE (RC) : grand, en rouge */}
-        {/* team manager : les messages visant sa voiture sont déjà dans la tuile, on ne garde ici que les messages généraux (sans numéro) */}
-        {(myCar ? rcMessages.filter((m) => m.nums.length === 0) : rcMessages).length > 0 && (
+        {/* team manager : tous les messages RC (généraux et visant sa voiture) sont dans la tuile, pas de grand bandeau */}
+        {!myCar && rcMessages.length > 0 && (
           <div className="mb-3 flex flex-col gap-2">
-            {(myCar ? rcMessages.filter((m) => m.nums.length === 0) : rcMessages).map((m) => (
+            {rcMessages.map((m) => (
               <div
                 key={m.key}
                 className="rounded-xl px-4 py-3 flex items-start gap-3 shadow-lg animate-pulse"
@@ -4070,7 +4073,7 @@ export default function PitBoard() {
                         className={`rounded-2xl shadow-lg transition-shadow ${compact ? "p-1.5" : "p-2"}`}
                         style={{
                           backgroundColor: "#0a0a0a",
-                          backgroundImage: `repeating-linear-gradient(45deg, ${car.couleur1} 0px, ${car.couleur1} 14px, rgba(10,10,10,1) 14px, rgba(10,10,10,1) 28px)`,
+                          backgroundImage: `repeating-linear-gradient(45deg, ${car.couleur1} 0px, ${car.couleur1} 14px, ${car.couleur2 || "#0a0a0a"} 14px, ${car.couleur2 || "#0a0a0a"} 28px)`,
                           boxShadow: `0 0 0 2.5px ${ringColor}, 0 6px 16px rgba(0,0,0,0.35)`,
                           gridColumn: recapView && expanded ? "span 2" : undefined,
                         }}
@@ -4202,6 +4205,7 @@ export default function PitBoard() {
                               ds={ds}
                               canEdit={canEdit}
                               onSet={(n, driverId) => confirmRelayDriver(car.id, n, driverId)}
+                              hideTotals={!!myCar}
                             />
                           )}
 
@@ -4220,13 +4224,22 @@ export default function PitBoard() {
                           )}
 
                           {/* RC visant cette voiture */}
-                          {rcForCar(car).map((m) => (
+                          {(myCar ? rcMessages : rcForCar(car)).map((m) => (
                             <div
                               key={m.key}
-                              className="rounded px-2 py-1 text-white font-black text-xs leading-snug"
+                              className="rounded px-2 py-1 text-white font-black text-xs leading-snug flex items-start justify-between gap-2"
                               style={{ backgroundColor: "#c40000", border: "1px solid #ff4040" }}
                             >
-                              ⚠ RC : {m.message}
+                              <span>⚠ RC : {m.message}</span>
+                              {myCar && (
+                                <button
+                                  onClick={() => setRcDismissed((prev) => new Set(prev).add(m.key))}
+                                  className="text-white/80 hover:text-white flex-shrink-0"
+                                  title="Masquer ce message"
+                                >
+                                  <X size={14} />
+                                </button>
+                              )}
                             </div>
                           ))}
 
@@ -4587,8 +4600,13 @@ export default function PitBoard() {
                           </span>
                         </div>
                         {dsM && dsM.curDriver && dsM.totals[dsM.curDriver.id] && (
-                          <div className="text-white/60 text-[11px] font-mono">
-                            Total roulage pilote : {fmtTimeHMS(dsM.totals[dsM.curDriver.id].total)}
+                          <div className="text-white/70 text-[11px] font-mono">
+                            Roulage {fmtTimeHMS(dsM.totals[dsM.curDriver.id].total)}{" "}
+                            <span className="text-white/50">
+                              🟢{fmtTimeHMS(dsM.totals[dsM.curDriver.id].vert)} 🟡{fmtTimeHMS(dsM.totals[dsM.curDriver.id].jaune)}
+                              {dsM.totals[dsM.curDriver.id].rouge >= 5 && <> 🔴{fmtTimeHMS(dsM.totals[dsM.curDriver.id].rouge)}</>}
+                              {" "}· {dsM.totals[dsM.curDriver.id].relays} relais
+                            </span>
                           </div>
                         )}
                       </div>
@@ -4649,7 +4667,7 @@ export default function PitBoard() {
                   className="rounded-2xl p-2 shadow-lg"
                   style={{
                     backgroundColor: "#0a0a0a",
-                    backgroundImage: `repeating-linear-gradient(45deg, ${m.couleur1} 0px, ${m.couleur1} 14px, rgba(10,10,10,1) 14px, rgba(10,10,10,1) 28px)`,
+                    backgroundImage: `repeating-linear-gradient(45deg, ${m.couleur1} 0px, ${m.couleur1} 14px, ${m.couleur2 || "#0a0a0a"} 14px, ${m.couleur2 || "#0a0a0a"} 28px)`,
                     boxShadow: "0 0 0 2.5px rgba(255,255,255,0.4), 0 6px 16px rgba(0,0,0,0.35)",
                   }}
                 >
