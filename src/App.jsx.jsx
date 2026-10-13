@@ -23,7 +23,7 @@ import {
   observeLap,
   mergeBest,
 } from "./lib/drivers";
-import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, classDuels, trackAlertRows, trackSwaps, aroundOnTrack, pitOutCars, classPositions } from "./lib/liveView";
+import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, trackAlertRows, aroundOnTrack, pitOutCars, classPositions } from "./lib/liveView";
 import {
   Flag,
   Plus,
@@ -848,12 +848,34 @@ function FitLine({ children, max = 16, min = 8, className = "", style }) {
   );
 }
 
+// style des alertes de la piste selon leur catégorie (voir trackAlertRows)
+const TRACK_STYLE = {
+  slow: { bg: "#ff8a00", fg: "#000", blink: true, label: "🐌 !!SLOW CAR!!" },
+  soon: { bg: "#ffe600", fg: "#000", label: "On le dépasse" },
+  calm: { bg: "#22c55e", fg: "#000", label: "On le dépasse" },
+  fast: { bg: "#ff1f1f", fg: "#fff", label: "🚀 !!FAST CAR!!" },
+  direct: { bg: "#ff1f1f", fg: "#fff", label: "⚔ CONCURRENT DIRECT" },
+  threat: { bg: "#ff8a00", fg: "#000", label: "Il nous dépasse" },
+};
+function AlertPill({ d }) {
+  const st = TRACK_STYLE[d.kind];
+  return (
+    <span className={`inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 font-sans font-black whitespace-nowrap ${st.blink ? "animate-pulse" : ""}`} style={{ backgroundColor: st.bg, color: st.fg, fontSize: 13 }}>
+      {st.label}
+      <span className="font-mono tabular-nums">{d.remainingMs <= 1000 ? "MAINTENANT" : fmtCountdown(d.remainingMs)}</span>
+    </span>
+  );
+}
+
 // Contenu du tableau « autour de nous sur la piste » : les voitures devant et derrière nous SUR LA PISTE, avec l'écart exact mesuré au dernier point commun
-function AroundTable({ data, prio, myPos, now, stale, nA, nB, setNA, setNB, outs, outDelay, setOutDelay }) {
+function AroundTable({ data, prio, alerts, myPos, myNum, myTeam, pilot, now, stale, nA, nB, setNA, setNB, outs, outDelay, setOutDelay }) {
   const hasCls = !!data && [...data.ahead, ...data.behind].some((r) => r.cat);
-  const cols = { gridTemplateColumns: hasCls ? "2.4rem 3.2rem 4.2rem 2.6rem minmax(0,1fr) 6.2rem 7.5rem 4.6rem 8.6rem 3.8rem" : "2.4rem 3.2rem minmax(0,1fr) 6.2rem 7.5rem 4.6rem 8.6rem 3.8rem" };
+  const cols = { gridTemplateColumns: hasCls ? "2.6rem 3.2rem 4.2rem 2.6rem minmax(7rem,1fr) 6.2rem 8rem 4.6rem 9rem 11rem" : "2.6rem 3.2rem minmax(7rem,1fr) 6.2rem 8rem 4.6rem 9rem 11rem" };
   const fmtAvg = (ms) => (ms == null ? "–" : `${Math.floor(ms / 60000)}:${((ms % 60000) / 1000).toFixed(1).padStart(4, "0")}`);
+  // alerte de la piste (règles de trackAlertRows) sur la ligne de la voiture concernée ; sinon simple compte à rebours
   const eta = (n) => {
+    const al = (alerts || []).find((x) => x.num === n);
+    if (al) return <AlertPill d={al} />;
     const d = (prio || []).find((x) => x.num === n);
     return d ? fmtCountdown(d.remainingMs) : "";
   };
@@ -876,7 +898,7 @@ function AroundTable({ data, prio, myPos, now, stale, nA, nB, setNA, setNB, outs
     const cls = t === "green" ? "text-black bg-[#39ff14] font-bold" : t === "red" ? "text-white bg-red-600 font-bold" : "text-white";
     const sub = t === "green" ? "text-black/70" : "text-white/60";
     return (
-      <div key={key + r.num} className={`grid items-center gap-2 px-2 py-0.5 font-sans border-b border-white/10 ${cls}`} style={{ ...cols, fontSize: 12 }}>
+      <div key={key + r.num} className={`grid items-center gap-2 px-2 py-0.5 font-sans border-b border-white/10 ${cls}`} style={{ ...cols, fontSize: 13 }}>
         <span className={sub}>P{r.pos}</span>
         <span className="font-black">#{r.num}</span>
         {hasCls && <span className={`truncate ${t ? "" : "text-white/80"}`}>{r.cat}</span>}
@@ -894,6 +916,9 @@ function AroundTable({ data, prio, myPos, now, stale, nA, nB, setNA, setNB, outs
   };
   const band = (txt, extra) => <div className={`px-2 py-0.5 font-black uppercase tracking-wide text-xs ${extra}`}>{txt}</div>;
   if (!data) return <div className="text-white/70 font-sans text-sm p-2">Pas encore assez de données (il faut quelques tours de notre voiture).</div>;
+  // alertes dont la voiture n'est pas dans les listes affichées
+  const shownNums = new Set([...data.ahead, ...data.behind].map((r) => r.num));
+  const hidden = (alerts || []).filter((d) => !shownNums.has(d.num));
   const ref = data.ref;
   const refAge = ref ? Math.max(0, Math.round((now - ref.at) / 1000)) : null;
   const delayInput = (
@@ -901,6 +926,17 @@ function AroundTable({ data, prio, myPos, now, stale, nA, nB, setNA, setNB, outs
   );
   return (
     <div>
+      {hidden.length > 0 && (
+        <div className="rounded border border-white/30 bg-black/50 px-2 py-1 mb-1 flex flex-wrap items-center gap-2 text-white font-sans" style={{ fontSize: 13 }}>
+          <span className="font-black uppercase">Alertes hors liste</span>
+          {hidden.map((d) => (
+            <span key={d.num} className="flex items-center gap-1.5">
+              <b>P{d.pos} #{d.num}</b>
+              <AlertPill d={d} />
+            </span>
+          ))}
+        </div>
+      )}
       {ref && (
         <div className="rounded border border-yellow-400/70 bg-black/50 px-2 py-1 mb-1 text-white font-sans text-xs">
           <span className="font-black uppercase text-yellow-300">Chrono pris {ref.point === "Ligne" ? "à la ligne" : `au ${ref.point}`}</span>
@@ -957,13 +993,24 @@ function AroundTable({ data, prio, myPos, now, stale, nA, nB, setNA, setNB, outs
       <div className="text-white/60 font-sans text-xs px-2 pb-1">
         Écart mesuré au dernier point (S1, S2 ou ligne) franchi par la voiture et par nous. Estimation = compte à rebours avant le dépassement quand il est prévu.
       </div>
-      <div className="grid gap-2 px-2 pb-0.5 text-white/50 font-sans font-black uppercase" style={{ ...cols, fontSize: 10 }}>
-        <span>Pos</span><span>N°</span>{hasCls && <span>Classe</span>}{hasCls && <span>PIC</span>}<span>Équipe</span><span className="text-right">Écart</span><span>Tendance</span><span className="text-right">Moy. 10 t.</span><span>Rythme vs nous</span><span className="text-right">Estim.</span>
+      <div className="grid gap-2 px-2 pb-0.5 text-white/60 font-sans font-black uppercase" style={{ ...cols, fontSize: 12 }}>
+        <span>Pos</span><span>N°</span>{hasCls && <span>Classe</span>}{hasCls && <span>PIC</span>}<span>Équipe</span><span className="text-right">Écart</span><span>Tendance</span><span className="text-right">Moy. 10 t.</span><span>Rythme vs nous</span><span className="text-right">Alerte / estim.</span>
       </div>
       {band(`↗ Devant nous (${data.ahead.length})`, "bg-white/10 text-white")}
       {data.ahead.length === 0 && <div className="px-2 py-1 text-white/50 text-xs">Aucune voiture devant sur ce tour</div>}
       {data.ahead.map((r) => row(r, "a"))}
-      {band(`NOUS · P${myPos ?? "?"}${data.me && data.me.cat ? ` · ${data.me.cat} · ${data.me.pic}e de la classe` : ""}`, "bg-yellow-400 text-black")}
+      <div className="grid items-center gap-2 px-2 py-1 font-sans font-black bg-blue-600 text-white" style={{ ...cols, fontSize: 14 }}>
+        <span>P{myPos ?? "?"}</span>
+        <span>#{myNum}</span>
+        {hasCls && <span className="truncate">{data.me ? data.me.cat : ""}</span>}
+        {hasCls && <span className="font-mono tabular-nums">{data.me && data.me.pic != null ? `${data.me.pic}e` : ""}</span>}
+        <span className="truncate">{pilot || "NOUS"}{pilot && myTeam ? <span className="font-normal opacity-80"> · {myTeam}</span> : null}</span>
+        <span />
+        <span />
+        <span className="font-mono tabular-nums text-right">{data.myAvg ? fmtAvg(data.myAvg.ms) : "–"}</span>
+        <span />
+        <span />
+      </div>
       {band(`↘ Derrière nous (${data.behind.length})`, "bg-white/10 text-white")}
       {data.behind.length === 0 && <div className="px-2 py-1 text-white/50 text-xs">Aucune voiture derrière sur ce tour</div>}
       {data.behind.map((r) => row(r, "b"))}
@@ -1083,7 +1130,7 @@ function WindowHost({ title, onClose, wide, children }) {
 }
 
 // « Autour de nous sur la piste » : les voitures devant et derrière nous sur la piste (contenu, sans fenêtre)
-function AroundPane({ compute, getOuts, lapEnd, prio, myPos, now }) {
+function AroundPane({ compute, getOuts, lapEnd, prio, alerts, myPos, myNum, myTeam, pilot, now }) {
   const getS = (k, d) => {
     try {
       const v = localStorage.getItem(k);
@@ -1118,21 +1165,21 @@ function AroundPane({ compute, getOuts, lapEnd, prio, myPos, now }) {
   if (data) last.current = { data, at: now };
   const shown = data || (last.current && last.current.data) || null; // on garde le dernier tableau valide si le calcul est momentanément impossible
   const stale = !data && last.current ? Math.round((now - last.current.at) / 1000) : 0;
-  return <AroundTable data={shown} prio={prio} myPos={myPos} now={now} stale={stale} nA={nA} nB={nB} setNA={setNA} setNB={setNB} outs={outs} outDelay={outDelay} setOutDelay={setOutDelay} />;
+  return <AroundTable data={shown} prio={prio} alerts={alerts} myPos={myPos} myNum={myNum} myTeam={myTeam} pilot={pilot} now={now} stale={stale} nA={nA} nB={nB} setNA={setNA} setNB={setNB} outs={outs} outDelay={outDelay} setOutDelay={setOutDelay} />;
 }
 
 // fenêtre unique : « Classement » à gauche, « Autour de nous sur la piste » à droite
-function BothWindow({ cars, num, now, prio, myPos, lapEnd, cl, setCl, compute, getOuts, onClose }) {
+function BothWindow({ cars, num, now, prio, alerts, myPos, pilot, lapEnd, cl, setCl, compute, getOuts, onClose }) {
   return (
     <WindowHost title="Classement et autour de nous" onClose={onClose} wide>
-      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)] gap-3 items-start">
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(615px,0.85fr)_minmax(0,1.5fr)] gap-3 items-start">
         <section className="min-w-0 overflow-x-auto rounded-lg border border-white/20 p-2">
           <h3 className="text-white font-black uppercase tracking-wide text-sm pb-1">Classement</h3>
           <ClassementPanel cars={cars} num={num} now={now} st={cl} setSt={setCl} big inWindow />
         </section>
         <section className="min-w-0 overflow-x-auto rounded-lg border border-white/20 p-2">
           <h3 className="text-white font-black uppercase tracking-wide text-sm pb-1">Autour de nous sur la piste</h3>
-          <AroundPane compute={compute} getOuts={getOuts} lapEnd={lapEnd} prio={prio} myPos={myPos} now={now} />
+          <AroundPane compute={compute} getOuts={getOuts} lapEnd={lapEnd} prio={prio} alerts={alerts} myPos={myPos} myNum={num} myTeam={cars[num] ? cars[num].team : ""} pilot={pilot} now={now} />
         </section>
       </div>
     </WindowHost>
@@ -1153,7 +1200,7 @@ function loadClassement() {
 }
 function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow }) {
   const BLUE = "#5cc8ff";
-  const tcls = big ? "text-[11px]" : "text-[10px]";
+  const tcls = "text-[13px]"; // jamais moins de 12 px
   const me = cars[num];
   const cat = st.mode === "cat";
   const eng = me ? aroundOnTrack(cars, num, now, undefined, undefined, st.nA, st.nB, cat ? "pic" : "general") : null;
@@ -1257,8 +1304,7 @@ function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow })
 
 // bloc "live" d'une tuile : temps de course, tour, intermédiaires, puis (si showTable) le classement
 // avec les 3 voitures devant et les 3 derrière, leurs intermédiaires et leur écart avec nous
-function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", big = false }) {
-  const [genOpen, setGenOpen] = useState(false); // menu déroulant du classement général (au-delà de 5 voitures)
+function LiveBlock({ info, live, num, now, showTable, driverBest, pilot = "", part = "all", big = false }) {
   const [bothOpen, setBothOpen] = useState(false); // fenêtre « Classement » + « Autour de nous sur la piste »
   const [cl, setClRaw] = useState(loadClassement); // réglages du tableau « Classement » (mémorisés sur l'appareil)
   const setCl = (patch) =>
@@ -1281,41 +1327,8 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", 
   const duel = duelEstimatesTrack(info.cars, num, remMs, undefined, undefined, now) || duelEstimates(nb || neighborsOf(info.cars, num, 3), remMs);
   const prio = duel && duel.onTrack ? prioritizedDuels(duel, now) : [];
   const trackRows = trackAlertRows(prio, live.pos);
-  const zones = classDuels(neighborsOf(info.cars, num, 6), remMs, now);
-  const swaps = trackSwaps(info.cars, num, live.pos, now); // ordre réel sur la piste ≠ classement (mis à jour à la ligne)
   const K = big ? 1.3 : 1; // agrandissement des alertes quand il y a de la place
   const fs = (n) => Math.round(n * K);
-  const cd = (ms, size) => (
-    <span className="font-mono tabular-nums font-black" style={{ fontSize: size }}>
-      {ms <= 1000 ? "MAINTENANT" : fmtCountdown(ms)}
-    </span>
-  );
-  // style d'une ligne du trafic selon sa catégorie (voir trackAlertRows)
-  const trackStyle = {
-    slow: { bg: "#ff8a00", fg: "#000", blink: true, label: "🐌 !!SLOW CAR!!" },
-    soon: { bg: "#ffe600", fg: "#000", label: "" },
-    calm: { bg: "#22c55e", fg: "#000", label: "" },
-    fast: { bg: "#ff1f1f", fg: "#fff", label: "🚀 !!FAST CAR!!" },
-    direct: { bg: "#ff1f1f", fg: "#fff", label: "⚔ CONCURRENT DIRECT" },
-    threat: { bg: "#ff8a00", fg: "#000", label: "" },
-  };
-  const trackRow = (d, large) => {
-    const st = trackStyle[d.kind];
-    const threat = d.dir === "threat";
-    return (
-      <div
-        key={d.dir + d.num}
-        className={`font-sans font-black leading-tight rounded px-2 ${d.small ? "py-0.5" : "py-1"} flex items-center justify-between gap-2 ${st.blink ? "animate-pulse" : ""}`}
-        style={{ backgroundColor: st.bg, color: st.fg }}
-      >
-        <FitLine max={d.small ? fs(10) : large ? fs(15) : fs(12)} min={8} className="flex-1">
-          {st.label ? `${st.label} · ` : ""}{d.pos ? `P${d.pos} ` : ""}#{d.num} {d.team} · {fmtGapMs(d.gapMs)} · {threat ? "−" : "+"}
-          {(d.closingMs / 1000).toFixed(1)} s/t
-        </FitLine>
-        {cd(d.remainingMs, fs(d.small ? 11 : large ? 20 : 14))}
-      </div>
-    );
-  };
   const BLUE = "#5cc8ff"; // meilleurs temps et intermédiaires (bleu clair, bien distinct du fond)
   const tcls = big ? "text-[11px]" : "text-[10px]";
   const isBest = (v, b) => v != null && b != null && v <= b;
@@ -1337,6 +1350,8 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", 
           num={num}
           now={now}
           prio={prio}
+          alerts={trackRows}
+          pilot={pilot}
           myPos={live.pos}
           lapEnd={info.cars[num] ? info.cars[num].lapEnd : null}
           cl={cl}
@@ -1348,12 +1363,17 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", 
         document.body
       )
     : null;
-  const tableEl = nb ? <button {...bothBtnProps}>☰ Classement et autour de nous</button> : null;
+  const tableEl = nb ? (
+    <>
+      <button {...bothBtnProps}>☰ Classement et autour de nous</button>
+      {bothWindow}
+    </>
+  ) : null;
+  if (part === "alerts") return null; // les alertes sont dans « Autour de nous sur la piste »
   if (part === "table")
     return nb ? (
       <div className={`rounded bg-black/80 px-2 py-1.5 flex flex-col gap-1 font-mono text-white ${tcls}`}>
         {tableEl}
-        {bothWindow}
       </div>
     ) : null;
   return (
@@ -1421,109 +1441,6 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", 
         </div>
       )}
         </>
-      )}
-      {part !== "table" && part !== "stats" && (
-        <div className="flex flex-col gap-2 pt-1 border-t border-white/10">
-          {(() => {
-            const urgent = [...trackRows].sort((a, b) => a.remainingMs - b.remainingMs);
-            // classement général : les 3 devant et les 3 derrière, sans couleur, avec l'estimation du temps avant dépassement
-            const zRow = (z) => {
-              const ahead = z.dir === "ahead";
-              let right;
-              const sw = swaps[z.num];
-              if (sw) {
-                // l'ordre sur la piste contredit le classement : étiquette jusqu'à ce que la ligne confirme
-                return (
-                  <div key={z.dir + z.num} className="flex items-center justify-between gap-2 px-1 text-white font-sans">
-                    <FitLine max={fs(11)} min={9} className="flex-1">
-                      <span className="text-white/60">{ahead ? "↗ devant" : "↘ derrière"}</span> P{z.pos} #{z.num} {z.team}
-                    </FitLine>
-                    <span
-                      className="rounded px-1.5 font-black uppercase whitespace-nowrap"
-                      style={{ fontSize: fs(10), backgroundColor: sw === "passedUs" ? "#ff1f1f" : "#e5e5e5", color: sw === "passedUs" ? "#fff" : "#000" }}
-                    >
-                      {sw === "passedUs" ? "↑ devant sur piste" : "↓ derrière sur piste"}
-                    </span>
-                  </div>
-                );
-              }
-              if (z.kind === "closing") right = fmtCountdown(z.remainingMs);
-              else if (z.kind === "lapped") right = `à ${z.gapLaps} tr`;
-              else if (z.kind === "away") right = z.farOff ? "–" : "s'éloigne";
-              else right = "–";
-              return (
-                <div key={z.dir + z.num} className="flex items-center justify-between gap-2 px-1 text-white font-sans">
-                  <FitLine max={fs(11)} min={9} className="flex-1">
-                    <span className="text-white/60">{ahead ? "↗ devant" : "↘ derrière"}</span> P{z.pos} #{z.num} {z.team}
-                    {z.gapMs != null && <span className="text-white/60"> · {fmtGapMs(z.gapMs)}</span>}
-                  </FitLine>
-                  <span className="font-mono tabular-nums font-black" style={{ fontSize: fs(12) }}>{right}</span>
-                </div>
-              );
-            };
-            return (
-              <>
-                {[
-                  { key: "chase", title: "🏁 Estimation avant dépassement", color: "#facc15", rows: urgent.filter((d) => d.dir === "chase"), none: "Aucune voiture à dépasser dans l'immédiat" },
-                  { key: "threat", title: "🏁 Estimation avant de nous faire dépasser", color: "#38bdf8", rows: urgent.filter((d) => d.dir === "threat").sort((a, b) => (a.small ? 1 : 0) - (b.small ? 1 : 0) || a.remainingMs - b.remainingMs), none: "Personne ne vient nous dépasser dans l'immédiat" },
-                ].map((box) => (
-                  <div key={box.key} className="rounded-lg p-1.5 flex flex-col gap-1 bg-black/40" style={{ border: `2px solid ${box.color}` }}>
-                    <span className="font-black uppercase tracking-wide font-sans" style={{ color: box.color, fontSize: fs(12) }}>{box.title}</span>
-                    {box.rows.length > 0 ? (
-                      box.rows.map((d) => trackRow(d, true))
-                    ) : (
-                      <div className="rounded px-2 py-1 bg-white/5 text-white/60 font-sans font-semibold" style={{ fontSize: fs(11) }}>{box.none}</div>
-                    )}
-                  </div>
-                ))}
-                {zones && (() => {
-                  // devant : seulement les équipages plus lents que nous (rythme des 5 derniers tours) ;
-                  // derrière : les 3 voisins, plus tout équipage plus rapide qui peut nous dépasser
-                  const genRows = [
-                    ...zones.ahead.filter((z) => z.kind === "closing" || swaps[z.num]),
-                    ...zones.behind.filter((z, i) => i < 3 || z.kind === "closing" || swaps[z.num]),
-                  ];
-                  const shown = genRows.slice(0, 5);
-                  const rest = genRows.slice(5);
-                  return (
-                    <div className="rounded-lg p-1.5 flex flex-col gap-0.5 bg-black/40 border border-white/25">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-black uppercase tracking-wide font-sans text-white/80" style={{ fontSize: fs(12) }}>
-                          🏆 Général · dépassement estimé
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => setBothOpen(true)}
-                          className="rounded border border-white/40 bg-black/40 hover:bg-black/60 px-2 py-0.5 text-white font-black uppercase tracking-wide whitespace-nowrap"
-                          style={{ fontSize: fs(10) }}
-                          title="Classement et voitures autour de nous sur la piste, avec l'écart mesuré aux intermédiaires"
-                        >
-                          ☰ Classement / Autour de nous
-                        </button>
-                      </div>
-                      {bothWindow}
-                      {genRows.length === 0 && <span className="text-white/60 font-sans px-1" style={{ fontSize: fs(11) }}>Aucun équipage concerné pour le moment</span>}
-                      {shown.map(zRow)}
-                      {rest.length > 0 && (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() => setGenOpen((o) => !o)}
-                            className="text-left rounded bg-black/30 hover:bg-black/45 px-2 py-0.5 text-white/80 font-black uppercase tracking-wide"
-                            style={{ fontSize: fs(10) }}
-                          >
-                            {genOpen ? "▾" : "▸"} {rest.length} autre{rest.length > 1 ? "s" : ""} équipage{rest.length > 1 ? "s" : ""}
-                          </button>
-                          {genOpen && rest.map(zRow)}
-                        </>
-                      )}
-                    </div>
-                  );
-                })()}
-              </>
-            );
-          })()}
-        </div>
       )}
       {nb && part === "all" && tableEl}
     </div>
@@ -3776,6 +3693,35 @@ export default function PitBoard() {
     );
   }
 
+  // bandeau rouge de la direction de course (RC), sur toute la largeur
+  const rcBanner =
+    rcMessages.length > 0 ? (
+      <div className="mb-3 flex flex-col gap-2 w-full">
+        {rcMessages.map((m) => (
+          <div
+            key={m.key}
+            className="rounded-xl px-4 py-3 flex items-start gap-3 shadow-lg animate-pulse"
+            style={{ backgroundColor: "#c40000", border: "3px solid #ff4040", animationIterationCount: 3 }}
+          >
+            <AlertTriangle size={30} color="#fff" className="flex-shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <div className="text-white/80 text-[11px] font-bold uppercase tracking-widest">
+                Direction de course (RC)
+                {m.nums.length > 0 && <> · voiture{m.nums.length > 1 ? "s" : ""} {m.nums.map((n) => "#" + n).join(" ")}</>}
+              </div>
+              <div className="text-white text-xl sm:text-2xl font-black leading-snug break-words">⚠ RC : {m.message}</div>
+            </div>
+            <button
+              onClick={() => setRcDismissed((prev) => new Set(prev).add(m.key))}
+              className="text-white/80 hover:text-white flex-shrink-0"
+              title="Masquer ce message"
+            >
+              <X size={20} />
+            </button>
+          </div>
+        ))}
+      </div>
+    ) : null;
   const visibleMessages = myCar ? messages.filter((m) => m.carId === myCar.id || m.numero === myCar.numero) : messages;
 
   return (
@@ -4535,35 +4481,8 @@ export default function PitBoard() {
           </div>
         )}
 
-        {/* DIRECTION DE COURSE (RC) : grand, en rouge */}
-        {/* team manager : tous les messages RC (généraux et visant sa voiture) sont dans la tuile, pas de grand bandeau */}
-        {!myCar && rcMessages.length > 0 && (
-          <div className="mb-3 flex flex-col gap-2">
-            {rcMessages.map((m) => (
-              <div
-                key={m.key}
-                className="rounded-xl px-4 py-3 flex items-start gap-3 shadow-lg animate-pulse"
-                style={{ backgroundColor: "#c40000", border: "3px solid #ff4040", animationIterationCount: 3 }}
-              >
-                <AlertTriangle size={30} color="#fff" className="flex-shrink-0 mt-0.5" />
-                <div className="flex-1 min-w-0">
-                  <div className="text-white/80 text-[11px] font-bold uppercase tracking-widest">
-                    Direction de course (RC)
-                    {m.nums.length > 0 && <> · voiture{m.nums.length > 1 ? "s" : ""} {m.nums.map((n) => "#" + n).join(" ")}</>}
-                  </div>
-                  <div className="text-white text-xl sm:text-2xl font-black leading-snug break-words">{m.message}</div>
-                </div>
-                <button
-                  onClick={() => setRcDismissed((prev) => new Set(prev).add(m.key))}
-                  className="text-white/80 hover:text-white flex-shrink-0"
-                  title="Masquer ce message"
-                >
-                  <X size={20} />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
+        {/* DIRECTION DE COURSE (RC) : grand, en rouge, sur toute la largeur (team manager : juste sous la jauge, voir plus bas) */}
+        {!myCar && rcBanner}
 
         {/* GRILLE DE DÉPART */}
         <div className="mb-4">
@@ -4699,7 +4618,7 @@ export default function PitBoard() {
                           }`}
                         >
                           {/* ALERTES RC : tout en haut de la tuile, entre le bord et le nom du pilote */}
-                          {(myCar ? rcMessages : rcForCar(car)).map((m) => (
+                          {(myCar ? [] : rcForCar(car)).map((m) => (
                             <div
                               key={m.key}
                               className="rounded px-2 py-1 text-white font-black text-xs leading-snug flex items-start justify-between gap-2"
@@ -4868,18 +4787,13 @@ export default function PitBoard() {
                                 now={now}
                                 showTable={expanded || !!myCar}
                                 part={myCar ? "stats" : "all"}
+                                pilot={ds && ds.curDriver ? driverName(ds.curDriver) : ""}
                                 driverBest={
                                   ds && ds.curDriver
                                     ? { name: driverName(ds.curDriver), best: ds.cfg.best[ds.curDriver.id] }
                                     : null
                                 }
                               />
-                              {/* team manager : alertes dans la tuile sur écran moyen, dans leur propre colonne sur grand écran */}
-                              {myCar && (
-                                <div className="xl:hidden">
-                                  <LiveBlock info={liveInfo} live={liveFor(car)} num={normalizeCarNumber(car.numero)} now={now} part="alerts" />
-                                </div>
-                              )}
                             </>
                           )}
 
@@ -5227,20 +5141,16 @@ export default function PitBoard() {
                   return (
                     <FitToScreen>
                     {topBar}
-                    <div className="w-full grid gap-2 items-start rounded-2xl bg-black/65 p-2 grid-cols-1 lg:grid-cols-[58%_minmax(0,1fr)] xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.5fr)_minmax(0,1.3fr)]">
+                    {rcBanner && <div className="mt-2">{rcBanner}</div>}
+                    <div className="w-full grid gap-2 items-start rounded-2xl bg-black/65 p-2 grid-cols-1 lg:grid-cols-[58%_minmax(0,1fr)] xl:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)]">
                       <div className="w-full order-2 lg:order-1">{carTiles.map((t) => renderTile(t))}</div>
-                      {myLive && (
-                        <div className="hidden xl:block order-2 sticky top-0">
-                          <LiveBlock info={liveInfo} live={myLive} num={normalizeCarNumber(myCar.numero)} now={now} part="alerts" big />
-                        </div>
-                      )}
                       <div className="order-1 lg:order-3 max-lg:contents lg:sticky lg:top-0 lg:flex lg:flex-col lg:gap-2">
                         {hasVideo ? (
-                          <div className="w-full max-w-[560px] max-lg:max-w-[260px] max-lg:mx-auto max-lg:sticky max-lg:top-0 max-lg:z-30 max-lg:order-1 rounded-2xl bg-neutral-900/95 p-2 shadow-lg">
+                          <div className="w-full max-lg:max-w-[260px] max-lg:mx-auto max-lg:sticky max-lg:top-0 max-lg:z-30 max-lg:order-1 rounded-2xl bg-neutral-900/95 p-2 shadow-lg">
                             <CarVideo url={vurl} always />
                           </div>
                         ) : (
-                          <div className="max-lg:hidden w-full max-w-[560px] rounded-2xl bg-neutral-900/70 border border-white/15 p-2 shadow-lg">
+                          <div className="max-lg:hidden w-full rounded-2xl bg-neutral-900/70 border border-white/15 p-2 shadow-lg">
                             <div className="w-full flex items-center justify-center text-center text-white/45 text-xs font-semibold px-4" style={{ aspectRatio: "16 / 9" }}>
                               Fenêtre vidéo vide : ajoutez le lien MyRacesLive dans « Configuration des voitures »
                             </div>
@@ -5256,6 +5166,7 @@ export default function PitBoard() {
                               showTable
                               part="table"
                               big
+                              pilot={dsM && dsM.curDriver ? driverName(dsM.curDriver) : ""}
                             />
                           </div>
                         )}
