@@ -23,7 +23,7 @@ import {
   observeLap,
   mergeBest,
 } from "./lib/drivers";
-import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, classDuels, trackAlertRows, trackSwaps, aroundOnTrack, pitOutCars } from "./lib/liveView";
+import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, classDuels, trackAlertRows, trackSwaps, aroundOnTrack, pitOutCars, classPositions } from "./lib/liveView";
 import {
   Flag,
   Plus,
@@ -848,21 +848,20 @@ function FitLine({ children, max = 16, min = 8, className = "", style }) {
   );
 }
 
-// Contenu du tableau « autour de nous » : voisins sur la piste, au classement général ou dans la classe (PIC), avec l'écart mesuré au dernier point commun
-function AroundTable({ data, prio, myPos, now, stale, nA, nB, setNA, setNB, outs, mode, setMode, showLaps, setShowLaps, outDelay, setOutDelay }) {
-  const rowsAll = data ? [...data.ahead, ...data.behind] : [];
-  const hasCls = rowsAll.some((r) => r.cat);
-  const byClass = mode !== "piste";
-  const colList = [["2.4rem", "Pos"], ["3.2rem", "N°"]];
-  if (hasCls) colList.push(["4.2rem", "Classe"], ["2.6rem", "PIC"]);
-  colList.push(["minmax(0,1fr)", "Équipe"]);
-  if (showLaps) colList.push(["3.6rem", "Tours"]);
-  colList.push(["6.6rem", "Écart"], ["5.6rem", "Gain/perte"], ["4.6rem", "Moy. 10 t."], ["8.4rem", "Rythme vs nous"], ["3.8rem", "Estim."]);
-  const cols = { gridTemplateColumns: colList.map((c) => c[0]).join(" ") };
+// Contenu du tableau « autour de nous sur la piste » : les voitures devant et derrière nous SUR LA PISTE, avec l'écart exact mesuré au dernier point commun
+function AroundTable({ data, prio, myPos, now, stale, nA, nB, setNA, setNB, outs, outDelay, setOutDelay }) {
+  const hasCls = !!data && [...data.ahead, ...data.behind].some((r) => r.cat);
+  const cols = { gridTemplateColumns: hasCls ? "2.4rem 3.2rem 4.2rem 2.6rem minmax(0,1fr) 6.2rem 7.5rem 4.6rem 8.6rem 3.8rem" : "2.4rem 3.2rem minmax(0,1fr) 6.2rem 7.5rem 4.6rem 8.6rem 3.8rem" };
   const fmtAvg = (ms) => (ms == null ? "–" : `${Math.floor(ms / 60000)}:${((ms % 60000) / 1000).toFixed(1).padStart(4, "0")}`);
   const eta = (n) => {
     const d = (prio || []).find((x) => x.num === n);
     return d ? fmtCountdown(d.remainingMs) : "";
+  };
+  const trend = (r, tinted) => {
+    if (r.trendMs == null) return <span className={tinted ? "" : "text-white/40"}>–</span>;
+    if (r.trendMs < -300) return <span style={tinted ? undefined : { color: "#38bdf8" }}>↘ se rapproche {fmtGapMs(-r.trendMs)}</span>;
+    if (r.trendMs > 300) return <span className={tinted ? "" : "text-white/60"}>↗ s'éloigne {fmtGapMs(r.trendMs)}</span>;
+    return <span className={tinted ? "" : "text-white/60"}>= stable</span>;
   };
   const pace = (r, tinted) => {
     if (r.deltaMs == null) return <span className={tinted ? "" : "text-white/40"}>–</span>;
@@ -870,20 +869,8 @@ function AroundTable({ data, prio, myPos, now, stale, nA, nB, setNA, setNB, outs
     if (Math.abs(d) < 0.05) return <span>= même rythme</span>;
     return d < 0 ? <span style={tinted ? undefined : { color: "#f87171" }}>{Math.abs(d).toFixed(1)} s/tr plus vite</span> : <span style={tinted ? undefined : { color: "#4ade80" }}>{d.toFixed(1)} s/tr plus lent</span>;
   };
-  // gain / perte sur le dernier tronçon : vert + = nous étions plus rapides, rouge − = nous étions plus lents
-  const gain = (r) => {
-    if (r.gainMs == null) return <span className="text-white/40">–</span>;
-    const g = r.gainMs / 1000;
-    if (Math.abs(g) < 0.05) return <span className="rounded px-1.5 bg-white/20 text-white font-black">0.0 s</span>;
-    return g > 0 ? (
-      <span className="rounded px-1.5 bg-green-600 text-white font-black">+{g.toFixed(1)} s</span>
-    ) : (
-      <span className="rounded px-1.5 bg-red-600 text-white font-black">−{Math.abs(g).toFixed(1)} s</span>
-    );
-  };
-  const lapsTxt = (r) => (r.lapsDiff == null ? "" : r.lapsDiff === 0 ? "=" : `${r.lapsDiff > 0 ? "+" : "−"}${Math.abs(r.lapsDiff)} t`);
-  // sur la piste : devant nous sur la piste mais derrière au général = vert fluo ; derrière nous sur la piste mais devant au général = rouge
-  const tint = (r, key) => (byClass || myPos == null ? null : key === "a" && r.pos > myPos ? "green" : key === "b" && r.pos < myPos ? "red" : null);
+  // devant nous sur la piste mais derrière au général = vert fluo ; derrière nous sur la piste mais devant au général = rouge
+  const tint = (r, key) => (myPos == null ? null : key === "a" && r.pos > myPos ? "green" : key === "b" && r.pos < myPos ? "red" : null);
   const row = (r, key) => {
     const t = tint(r, key);
     const cls = t === "green" ? "text-black bg-[#39ff14] font-bold" : t === "red" ? "text-white bg-red-600 font-bold" : "text-white";
@@ -893,20 +880,12 @@ function AroundTable({ data, prio, myPos, now, stale, nA, nB, setNA, setNB, outs
         <span className={sub}>P{r.pos}</span>
         <span className="font-black">#{r.num}</span>
         {hasCls && <span className={`truncate ${t ? "" : "text-white/80"}`}>{r.cat}</span>}
-        {hasCls && <span className={`font-mono tabular-nums font-black ${mode === "pic" ? "text-yellow-300" : ""}`}>{r.pic != null ? `${r.pic}e` : ""}</span>}
+        {hasCls && <span className="font-mono tabular-nums font-black">{r.pic != null ? `${r.pic}e` : ""}</span>}
         <span className="truncate">{r.team}</span>
-        {showLaps && <span className="font-mono tabular-nums">{lapsTxt(r)}</span>}
         <span className="font-mono tabular-nums font-black text-right">
-          {r.gapMs == null ? (
-            <span className="text-white/50 font-sans font-normal">{r.pit ? "stand" : "–"}</span>
-          ) : (
-            <>
-              {byClass && <span className="font-sans font-normal">{r.gapMs < 0 ? "↗ " : "↘ "}</span>}
-              {fmtGapMs(Math.abs(r.gapMs))} <span className={`font-sans font-normal ${t ? "opacity-70" : "text-white/50"}`}>{r.point}</span>
-            </>
-          )}
+          {fmtGapMs(Math.abs(r.gapMs))} <span className={`font-sans font-normal ${t ? "opacity-70" : "text-white/50"}`}>{r.point}</span>
         </span>
-        <span>{gain(r)}</span>
+        <span>{trend(r, !!t)}</span>
         <span className="font-mono tabular-nums text-right">{fmtAvg(r.avgMs)}</span>
         <span>{pace(r, !!t)}</span>
         <span className="font-mono tabular-nums font-black text-right">{eta(r.num)}</span>
@@ -917,21 +896,8 @@ function AroundTable({ data, prio, myPos, now, stale, nA, nB, setNA, setNB, outs
   if (!data) return <div className="text-white/70 font-sans text-sm p-2">Pas encore assez de données (il faut quelques tours de notre voiture).</div>;
   const ref = data.ref;
   const refAge = ref ? Math.max(0, Math.round((now - ref.at) / 1000)) : null;
-  const what = mode === "pic" ? "dans notre classe (PIC)" : mode === "general" ? "au classement général" : "sur la piste";
-  const chip = (id, label) => (
-    <button key={id} type="button" onClick={() => setMode(id)} className={`rounded px-2 py-0.5 font-black text-xs border ${mode === id ? "bg-yellow-400 text-black border-yellow-400" : "bg-black/40 text-white border-white/30"}`}>
-      {label}
-    </button>
-  );
-  const sel = (lbl, v, set) => (
-    <label key={lbl} className="flex items-center gap-1">
-      <span className="font-black uppercase">{lbl}</span>
-      <select value={v} onChange={(e) => set(Number(e.target.value))} className="rounded bg-black/60 border border-white/30 px-1 py-0.5 text-white">
-        {[3, 5, 10, 15, 25, 40, 60, 80, 115].map((n) => (
-          <option key={n} value={n}>{n} voitures</option>
-        ))}
-      </select>
-    </label>
+  const delayInput = (
+    <input type="number" min={0} max={120} value={outDelay} onChange={(e) => setOutDelay(Math.max(0, Math.min(120, Number(e.target.value) || 0)))} className="w-14 rounded bg-black/60 border border-white/30 px-1 py-0.5 text-white" />
   );
   return (
     <div>
@@ -951,14 +917,12 @@ function AroundTable({ data, prio, myPos, now, stale, nA, nB, setNA, setNB, outs
         <span className="font-black uppercase">Notre moyenne</span> : <b className="font-mono">{data.myAvg ? fmtAvg(data.myAvg.ms) : "pas encore calculable"}</b>
         <span className="text-white/60">{data.myAvg ? ` sur ${data.myAvg.n} tours (hors tours > 5 % plus lents que la moyenne)` : " (il faut au moins 3 tours enregistrés depuis l'ouverture de la page)"}</span>
       </div>
-      {outs && (
+      {outs ? (
         <div className="rounded border border-sky-400/70 bg-sky-500/10 px-2 py-1 mb-1 text-white font-sans text-xs">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <span className="font-black uppercase text-sky-300">Sortis des stands {outs.list.length ? `(${outs.list.length})` : ""}</span>
             <label className="flex items-center gap-1 text-white/80">
-              relevé
-              <input type="number" min={0} max={120} value={outDelay} onChange={(e) => setOutDelay(Math.max(0, Math.min(120, Number(e.target.value) || 0)))} className="w-14 rounded bg-black/60 border border-white/30 px-1 py-0.5 text-white" />
-              s après notre passage de la ligne
+              relevé {delayInput} s après notre passage de la ligne
             </label>
             {outs.wait > 0 && <span className="text-white/60">liste précédente, mise à jour dans {outs.wait} s</span>}
           </div>
@@ -973,51 +937,42 @@ function AroundTable({ data, prio, myPos, now, stale, nA, nB, setNA, setNB, outs
             </div>
           ))}
         </div>
-      )}
-      {!outs && (
+      ) : (
         <div className="rounded border border-sky-400/40 px-2 py-1 mb-1 text-white/70 font-sans text-xs flex items-center gap-2">
-          Sortis des stands : relevé
-          <input type="number" min={0} max={120} value={outDelay} onChange={(e) => setOutDelay(Math.max(0, Math.min(120, Number(e.target.value) || 0)))} className="w-14 rounded bg-black/60 border border-white/30 px-1 py-0.5 text-white" />
-          s après notre passage de la ligne
+          Sortis des stands : relevé {delayInput} s après notre passage de la ligne
         </div>
       )}
       <div className="flex flex-wrap items-center gap-3 px-2 pb-1 text-white font-sans text-xs">
-        <span className="flex items-center gap-1">
-          <span className="font-black uppercase">Voisins</span>
-          {chip("piste", "Sur la piste")}
-          {chip("general", "Général")}
-          {chip("pic", "PIC")}
-        </span>
-        <label className="flex items-center gap-1 cursor-pointer">
-          <input type="checkbox" checked={showLaps} onChange={(e) => setShowLaps(e.target.checked)} />
-          <span className="font-black uppercase">Tours</span>
-        </label>
-        {sel("Devant", nA, setNA)}
-        {sel("Derrière", nB, setNB)}
-      </div>
-      <div className="text-white/60 font-sans text-xs px-2 pb-1">
-        Écart mesuré au dernier point (S1, S2 ou ligne) franchi par la voiture et par nous, remis à jour à chaque point.{" "}
-        {byClass ? "↗ = elle est passée avant nous au point, ↘ = après nous. " : ""}
-        Gain/perte = temps pris ou perdu sur elle dans le dernier tronçon (vert + : nous étions plus rapides ; rouge − : plus lents). Estimation = compte à rebours avant le dépassement quand il est prévu.
-      </div>
-      <div className="grid gap-2 px-2 pb-0.5 text-white/50 font-sans font-black uppercase" style={{ ...cols, fontSize: 10 }}>
-        {colList.map((c, i) => (
-          <span key={i} className={["Écart", "Moy. 10 t.", "Estim."].includes(c[1]) ? "text-right" : ""}>{c[1]}</span>
+        {[["Devant", nA, setNA], ["Derrière", nB, setNB]].map(([lbl, v, set]) => (
+          <label key={lbl} className="flex items-center gap-1">
+            <span className="font-black uppercase">{lbl}</span>
+            <select value={v} onChange={(e) => set(Number(e.target.value))} className="rounded bg-black/60 border border-white/30 px-1 py-0.5 text-white">
+              {[3, 5, 10, 15, 25, 40, 60].map((n) => (
+                <option key={n} value={n}>{n} voitures</option>
+              ))}
+            </select>
+          </label>
         ))}
       </div>
-      {band(`↗ Devant nous ${what} (${data.ahead.length})`, "bg-white/10 text-white")}
-      {data.ahead.length === 0 && <div className="px-2 py-1 text-white/50 text-xs">Aucune voiture devant</div>}
+      <div className="text-white/60 font-sans text-xs px-2 pb-1">
+        Écart mesuré au dernier point (S1, S2 ou ligne) franchi par la voiture et par nous. Estimation = compte à rebours avant le dépassement quand il est prévu.
+      </div>
+      <div className="grid gap-2 px-2 pb-0.5 text-white/50 font-sans font-black uppercase" style={{ ...cols, fontSize: 10 }}>
+        <span>Pos</span><span>N°</span>{hasCls && <span>Classe</span>}{hasCls && <span>PIC</span>}<span>Équipe</span><span className="text-right">Écart</span><span>Tendance</span><span className="text-right">Moy. 10 t.</span><span>Rythme vs nous</span><span className="text-right">Estim.</span>
+      </div>
+      {band(`↗ Devant nous (${data.ahead.length})`, "bg-white/10 text-white")}
+      {data.ahead.length === 0 && <div className="px-2 py-1 text-white/50 text-xs">Aucune voiture devant sur ce tour</div>}
       {data.ahead.map((r) => row(r, "a"))}
       {band(`NOUS · P${myPos ?? "?"}${data.me && data.me.cat ? ` · ${data.me.cat} · ${data.me.pic}e de la classe` : ""}`, "bg-yellow-400 text-black")}
-      {band(`↘ Derrière nous ${what} (${data.behind.length})`, "bg-white/10 text-white")}
-      {data.behind.length === 0 && <div className="px-2 py-1 text-white/50 text-xs">Aucune voiture derrière</div>}
+      {band(`↘ Derrière nous (${data.behind.length})`, "bg-white/10 text-white")}
+      {data.behind.length === 0 && <div className="px-2 py-1 text-white/50 text-xs">Aucune voiture derrière sur ce tour</div>}
       {data.behind.map((r) => row(r, "b"))}
     </div>
   );
 }
 
 // Fenêtre flottante, déplaçable à la souris (barre de titre) ou avec ◀ ▶ : la vidéo reste visible et utilisable derrière
-function FloatingPanel({ title, onClose, onPopout, children }) {
+function FloatingPanel({ title, onClose, onPopout, wide, children }) {
   const KEY = "pitboard_around_pos";
   const box = useRef(null);
   const drag = useRef(null);
@@ -1061,7 +1016,7 @@ function FloatingPanel({ title, onClose, onPopout, children }) {
     <div
       ref={box}
       className="fixed z-50 flex flex-col rounded-xl border border-white/30 bg-neutral-900/95 shadow-2xl"
-      style={{ left: pos.x, top: pos.y, width: "min(1000px, calc(100vw - 16px))", maxHeight: "calc(100vh - 16px)", minWidth: 420, resize: "both", overflow: "hidden" }}
+      style={{ left: pos.x, top: pos.y, width: wide ? "min(1700px, calc(100vw - 16px))" : "min(1000px, calc(100vw - 16px))", maxHeight: "calc(100vh - 16px)", minWidth: wide ? 700 : 420, resize: "both", overflow: "hidden" }}
     >
       <div
         className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-white/10 cursor-move select-none touch-none"
@@ -1083,46 +1038,8 @@ function FloatingPanel({ title, onClose, onPopout, children }) {
   );
 }
 
-// « Autour de nous » : fenêtre flottante déplaçable, ou fenêtre séparée du navigateur (par exemple sur un autre écran)
-function AroundWindow({ compute, getOuts, lapEnd, prio, myPos, now, onClose }) {
-  const getS = (k, d) => {
-    try {
-      const v = localStorage.getItem(k);
-      return v == null ? d : v;
-    } catch {
-      return d;
-    }
-  };
-  const putS = (k, v) => {
-    try {
-      localStorage.setItem(k, String(v));
-    } catch {
-      /* stockage indisponible */
-    }
-  };
-  const [nA, setNAraw] = useState(() => Number(getS("pitboard_around_ahead", 25)) || 25);
-  const [nB, setNBraw] = useState(() => Number(getS("pitboard_around_behind", 15)) || 15);
-  const [mode, setModeRaw] = useState(() => (["piste", "general", "pic"].includes(getS("pitboard_around_mode", "piste")) ? getS("pitboard_around_mode", "piste") : "piste"));
-  const [showLaps, setShowLapsRaw] = useState(() => getS("pitboard_around_laps", "0") === "1");
-  const [outDelay, setOutDelayRaw] = useState(() => {
-    const v = Number(getS("pitboard_around_outdelay", 15));
-    return Number.isFinite(v) && v >= 0 ? v : 15;
-  });
-  const setNA = (v) => { setNAraw(v); putS("pitboard_around_ahead", v); };
-  const setNB = (v) => { setNBraw(v); putS("pitboard_around_behind", v); };
-  const setMode = (v) => { setModeRaw(v); putS("pitboard_around_mode", v); };
-  const setShowLaps = (v) => { setShowLapsRaw(v); putS("pitboard_around_laps", v ? "1" : "0"); };
-  const setOutDelay = (v) => { setOutDelayRaw(v); putS("pitboard_around_outdelay", v); };
-  const data = compute(nA, nB, mode);
-  // voitures sorties des stands : relevé figé N secondes après chacun de nos passages de ligne (S3 / S/F)
-  const outSnap = useRef(null);
-  const sinceLine = lapEnd != null ? now - lapEnd : null;
-  if (lapEnd != null && sinceLine >= outDelay * 1000 && (!outSnap.current || outSnap.current.lapEnd !== lapEnd || outSnap.current.delay !== outDelay)) outSnap.current = { lapEnd, delay: outDelay, at: now, list: getOuts(lapEnd - 30000) };
-  const outs = outSnap.current ? { ...outSnap.current, wait: outSnap.current.lapEnd === lapEnd ? 0 : Math.max(0, Math.ceil((outDelay * 1000 - (sinceLine ?? 0)) / 1000)) } : null;
-  const last = useRef(null);
-  if (data) last.current = { data, at: now };
-  const shown = data || (last.current && last.current.data) || null; // on garde le dernier tableau valide si le calcul est momentanément impossible
-  const stale = !data && last.current ? Math.round((now - last.current.at) / 1000) : 0;
+// Fenêtre flottante déplaçable, ou fenêtre séparée du navigateur (par exemple sur un autre écran) : contenu fourni par l'appelant
+function WindowHost({ title, onClose, wide, children }) {
   const [popup, setPopup] = useState(null); // { w, root } quand la fenêtre séparée est ouverte
   const [msg, setMsg] = useState("");
   useEffect(() => {
@@ -1140,13 +1057,13 @@ function AroundWindow({ compute, getOuts, lapEnd, prio, myPos, now, onClose }) {
     };
   }, [popup]);
   const openPopup = () => {
-    const w = window.open("", "pitboard_autour", "popup=yes,width=1100,height=900,left=40,top=40");
+    const w = window.open("", "pitboard_" + title.replace(/\W+/g, "_"), `popup=yes,width=${wide ? Math.min(1700, (window.screen && window.screen.availWidth) || 1700) : 1100},height=900,left=0,top=40`);
     if (!w) {
       setMsg("La fenêtre séparée a été bloquée par le navigateur : autorisez les pop-ups pour ce site, puis réessayez.");
       return;
     }
     setMsg("");
-    w.document.title = "PitBoard · Autour de nous";
+    w.document.title = "PitBoard · " + title;
     w.document.head.innerHTML = '<meta charset="utf-8">';
     document.querySelectorAll('link[rel="stylesheet"], style').forEach((n) => w.document.head.appendChild(n.cloneNode(true)));
     w.document.body.innerHTML = "";
@@ -1156,13 +1073,185 @@ function AroundWindow({ compute, getOuts, lapEnd, prio, myPos, now, onClose }) {
     w.document.body.appendChild(root);
     setPopup({ w, root });
   };
-  const table = <AroundTable data={shown} prio={prio} myPos={myPos} now={now} stale={stale} nA={nA} nB={nB} setNA={setNA} setNB={setNB} outs={outs} mode={mode} setMode={setMode} showLaps={showLaps} setShowLaps={setShowLaps} outDelay={outDelay} setOutDelay={setOutDelay} />;
-  if (popup) return createPortal(<div className="bg-neutral-900 p-2 min-h-screen">{table}</div>, popup.root);
+  if (popup) return createPortal(<div className="bg-neutral-900 p-2 min-h-screen">{children}</div>, popup.root);
   return (
-    <FloatingPanel title="Autour de nous" onClose={onClose} onPopout={openPopup}>
+    <FloatingPanel title={title} onClose={onClose} onPopout={openPopup} wide={wide}>
       {msg && <div className="rounded bg-red-500/20 border border-red-400/60 px-2 py-1 mb-1 text-red-200 font-sans text-xs">{msg}</div>}
-      {table}
+      {children}
     </FloatingPanel>
+  );
+}
+
+// « Autour de nous sur la piste » : les voitures devant et derrière nous sur la piste (contenu, sans fenêtre)
+function AroundPane({ compute, getOuts, lapEnd, prio, myPos, now }) {
+  const getS = (k, d) => {
+    try {
+      const v = localStorage.getItem(k);
+      return v == null ? d : v;
+    } catch {
+      return d;
+    }
+  };
+  const putS = (k, v) => {
+    try {
+      localStorage.setItem(k, String(v));
+    } catch {
+      /* stockage indisponible */
+    }
+  };
+  const [nA, setNAraw] = useState(() => Number(getS("pitboard_around_ahead", 25)) || 25);
+  const [nB, setNBraw] = useState(() => Number(getS("pitboard_around_behind", 15)) || 15);
+  const [outDelay, setOutDelayRaw] = useState(() => {
+    const v = Number(getS("pitboard_around_outdelay", 15));
+    return Number.isFinite(v) && v >= 0 ? v : 15;
+  });
+  const setNA = (v) => { setNAraw(v); putS("pitboard_around_ahead", v); };
+  const setNB = (v) => { setNBraw(v); putS("pitboard_around_behind", v); };
+  const setOutDelay = (v) => { setOutDelayRaw(v); putS("pitboard_around_outdelay", v); };
+  const data = compute(nA, nB);
+  // voitures sorties des stands : relevé figé N secondes après chacun de nos passages de ligne (S3 / S/F)
+  const outSnap = useRef(null);
+  const sinceLine = lapEnd != null ? now - lapEnd : null;
+  if (lapEnd != null && sinceLine >= outDelay * 1000 && (!outSnap.current || outSnap.current.lapEnd !== lapEnd || outSnap.current.delay !== outDelay)) outSnap.current = { lapEnd, delay: outDelay, at: now, list: getOuts(lapEnd - 30000) };
+  const outs = outSnap.current ? { ...outSnap.current, wait: outSnap.current.lapEnd === lapEnd ? 0 : Math.max(0, Math.ceil((outDelay * 1000 - (sinceLine ?? 0)) / 1000)) } : null;
+  const last = useRef(null);
+  if (data) last.current = { data, at: now };
+  const shown = data || (last.current && last.current.data) || null; // on garde le dernier tableau valide si le calcul est momentanément impossible
+  const stale = !data && last.current ? Math.round((now - last.current.at) / 1000) : 0;
+  return <AroundTable data={shown} prio={prio} myPos={myPos} now={now} stale={stale} nA={nA} nB={nB} setNA={setNA} setNB={setNB} outs={outs} outDelay={outDelay} setOutDelay={setOutDelay} />;
+}
+
+// fenêtre unique : « Classement » à gauche, « Autour de nous sur la piste » à droite
+function BothWindow({ cars, num, now, prio, myPos, lapEnd, cl, setCl, compute, getOuts, onClose }) {
+  return (
+    <WindowHost title="Classement et autour de nous" onClose={onClose} wide>
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)] gap-3 items-start">
+        <section className="min-w-0 overflow-x-auto rounded-lg border border-white/20 p-2">
+          <h3 className="text-white font-black uppercase tracking-wide text-sm pb-1">Classement</h3>
+          <ClassementPanel cars={cars} num={num} now={now} st={cl} setSt={setCl} big inWindow />
+        </section>
+        <section className="min-w-0 overflow-x-auto rounded-lg border border-white/20 p-2">
+          <h3 className="text-white font-black uppercase tracking-wide text-sm pb-1">Autour de nous sur la piste</h3>
+          <AroundPane compute={compute} getOuts={getOuts} lapEnd={lapEnd} prio={prio} myPos={myPos} now={now} />
+        </section>
+      </div>
+    </WindowHost>
+  );
+}
+
+// « Classement » : voisins au classement général ou dans la classe, écarts mesurés à chaque point (S1, S2, ligne), gain/perte sur le dernier tronçon
+const CL_KEY = "pitboard_classement";
+function loadClassement() {
+  const d = { mode: "general", nA: 25, nB: 15 };
+  try {
+    const v = JSON.parse(localStorage.getItem(CL_KEY) || "null");
+    if (v) return { mode: v.mode === "cat" ? "cat" : "general", nA: Number(v.nA) > 0 ? Number(v.nA) : 25, nB: Number(v.nB) > 0 ? Number(v.nB) : 15 };
+  } catch {
+    /* stockage indisponible */
+  }
+  return d;
+}
+function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow }) {
+  const BLUE = "#5cc8ff";
+  const tcls = big ? "text-[11px]" : "text-[10px]";
+  const me = cars[num];
+  const cat = st.mode === "cat";
+  const eng = me ? aroundOnTrack(cars, num, now, undefined, undefined, st.nA, st.nB, cat ? "pic" : "general") : null;
+  let ahead, behind;
+  if (eng) {
+    ahead = eng.ahead;
+    behind = eng.behind;
+  } else {
+    // repli (notre voiture aux stands, pas assez de tours) : classement du flux, écarts du flux
+    const all = neighborsOf(cars, num, 115);
+    const cls = classPositions(cars);
+    const keep = (r) => !cat || ((cls[r.num] || {}).cat || "") === ((cls[num] || {}).cat || "");
+    const mkf = (r) => ({ num: r.num, pos: r.pos, pic: (cls[r.num] || {}).pic ?? null, gapMs: null, point: null, gainMs: null });
+    ahead = all ? all.above.filter(keep).slice(-st.nA).map(mkf) : [];
+    behind = all ? all.below.filter(keep).slice(0, st.nB).map(mkf) : [];
+  }
+  const myCls = classPositions(cars)[num] || {};
+  const isBest = (v, b) => v != null && b != null && v <= b;
+  const hl = (v, b, onMe) => (isBest(v, b) ? { color: onMe ? "#0033cc" : BLUE, fontWeight: 800 } : undefined);
+  const colList = [[inWindow ? "2.4rem" : "2rem", cat ? "PIC" : "Pos"], [inWindow ? "minmax(6rem,1fr)" : "minmax(1.5rem,1fr)", "Voiture"]];
+  colList.push([inWindow ? "3rem" : "1.7rem", "Tours"]);
+  colList.push([inWindow ? "4.2rem" : "3.6rem", "Tour"], [inWindow ? "3rem" : "2.3rem", "S1"], [inWindow ? "3rem" : "2.3rem", "S2"], [inWindow ? "3rem" : "2.3rem", "S3"], [inWindow ? "5.2rem" : "3.4rem", "Écart"], [inWindow ? "3.4rem" : "2.5rem", "Gain"]);
+  const cols = { gridTemplateColumns: colList.map((c) => c[0]).join(" ") };
+  const rowCls = `grid items-center gap-x-1.5 font-mono whitespace-nowrap ${tcls}`;
+  const gapCell = (r, isAhead) => {
+    const c = cars[r.num] || {};
+    const laps = isAhead ? (me.gll || 0) - (c.gll || 0) : (c.gll || 0) - (me.gll || 0);
+    if (laps > 0) return `${laps} tr`;
+    if (r.gapMs != null) return (
+      <>
+        {fmtGapMs(Math.abs(r.gapMs))} <span className="text-white/40 font-sans">{r.point === "Ligne" ? "L" : r.point}</span>
+      </>
+    );
+    if (me.gl != null && c.gl != null) return fmtGapMs(Math.max(0, isAhead ? me.gl - c.gl : c.gl - me.gl));
+    return "–";
+  };
+  const gainCell = (r) => {
+    if (r.gainMs == null) return <span className="text-white/30">–</span>;
+    const g = r.gainMs / 1000;
+    if (Math.abs(g) < 0.05) return <span className="rounded px-1 bg-white/20 text-white font-black">0.0</span>;
+    return g > 0 ? <span className="rounded px-1 bg-green-600 text-white font-black">+{g.toFixed(1)}</span> : <span className="rounded px-1 bg-red-600 text-white font-black">−{Math.abs(g).toFixed(1)}</span>;
+  };
+  const line = (r, isAhead, isMe) => {
+    const c = isMe ? me : cars[r.num] || {};
+    return (
+      <div key={r.num} className={`${rowCls} px-1 py-0.5 ${isMe ? "rounded font-black" : "text-white"}`} style={isMe ? { ...cols, color: "#000", backgroundColor: "#ffe600" } : cols}>
+        <span>{cat ? (r.pic != null ? `${r.pic}e` : "") : `P${c.pos}`}</span>
+        <span className="truncate font-sans">
+          #{isMe ? num : r.num} {c.team}
+          {cat ? ` · P${c.pos}` : ""}
+        </span>
+        <span>{c.laps ?? "–"}</span>
+        <span style={hl(c.last, c.best, isMe)}>{fmtMs(c.last)}</span>
+        <span style={hl(c.s1, c.s1b, isMe)}>{fmtSec1(c.s1)}</span>
+        <span style={hl(c.s2, c.s2b, isMe)}>{fmtSec1(c.s2)}</span>
+        <span style={hl(c.s3, c.s3b, isMe)}>{fmtSec1(c.s3)}</span>
+        <span className="text-right">{isMe ? "" : <>{isAhead ? "▲ " : "▼ "}{gapCell(r, isAhead)}</>}</span>
+        <span className="text-right">{isMe ? "" : gainCell(r)}</span>
+      </div>
+    );
+  };
+  const chip = (id, label) => (
+    <button key={id} type="button" onClick={() => setSt({ mode: id })} className={`rounded px-1.5 py-0.5 font-black border ${st.mode === id ? "bg-yellow-400 text-black border-yellow-400" : "bg-black/40 text-white border-white/30"}`}>
+      {label}
+    </button>
+  );
+  const sel = (lbl, v, key) => (
+    <label key={key} className="flex items-center gap-1">
+      <span className="uppercase text-white/60">{lbl}</span>
+      <select value={v} onChange={(e) => setSt({ [key]: Number(e.target.value) })} className="rounded bg-black/60 border border-white/30 px-0.5 py-0 text-white">
+        {[3, 5, 10, 15, 25, 40, 60, 80, 115].map((n) => (
+          <option key={n} value={n}>{n}</option>
+        ))}
+      </select>
+    </label>
+  );
+  return (
+    <div className="flex flex-col gap-0.5 pt-1 border-t border-white/10">
+      <div className={`flex flex-wrap items-center gap-x-2 gap-y-1 pb-1 font-sans ${tcls}`}>
+        {chip("general", "Général")}
+        {chip("cat", `Catégorie${myCls.cat ? " " + myCls.cat : ""}`)}
+        {sel("Devant", st.nA, "nA")}
+        {sel("Derrière", st.nB, "nB")}
+      </div>
+      <div className={`${rowCls} px-1 text-white/60 uppercase`} style={cols}>
+        {colList.map((c, i) => (
+          <span key={i} className={c[1] === "Écart" || c[1] === "Gain" ? "text-right" : ""}>{c[1]}</span>
+        ))}
+      </div>
+      {ahead.map((r) => line(r, true, false))}
+      {me && line({ num, pic: myCls.pic }, false, true)}
+      {behind.map((r) => line(r, false, false))}
+      {inWindow && (
+        <div className="text-white/50 font-sans text-xs pt-1">
+          Écart mesuré à chaque point (S1, S2, L = ligne) franchi par la voiture et par nous. Gain : temps pris (vert +) ou perdu (rouge −) sur la voiture dans le dernier tronçon.
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1170,7 +1259,18 @@ function AroundWindow({ compute, getOuts, lapEnd, prio, myPos, now, onClose }) {
 // avec les 3 voitures devant et les 3 derrière, leurs intermédiaires et leur écart avec nous
 function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", big = false }) {
   const [genOpen, setGenOpen] = useState(false); // menu déroulant du classement général (au-delà de 5 voitures)
-  const [aroundOpen, setAroundOpen] = useState(false); // fenêtre « autour de nous sur la piste »
+  const [bothOpen, setBothOpen] = useState(false); // fenêtre « Classement » + « Autour de nous sur la piste »
+  const [cl, setClRaw] = useState(loadClassement); // réglages du tableau « Classement » (mémorisés sur l'appareil)
+  const setCl = (patch) =>
+    setClRaw((p) => {
+      const n = { ...p, ...patch };
+      try {
+        localStorage.setItem(CL_KEY, JSON.stringify(n));
+      } catch {
+        /* stockage indisponible */
+      }
+      return n;
+    });
   if (!live) return null;
   const clock = clockNow(info, now);
   const nb = showTable && part !== "main" && part !== "alerts" ? neighborsOf(info.cars, num, 3) : null;
@@ -1224,50 +1324,36 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", 
       {fmtMs(v)}
     </span>
   );
-  const gapTxt = (r) =>
-    !r.gap ? "–" : r.gap.laps ? `${r.gap.laps} tr` : fmtGapMs(r.gap.ms);
-  const rowCls = `grid items-center gap-x-1.5 font-mono whitespace-nowrap ${tcls}`;
-  const cols = { gridTemplateColumns: big ? "1.9rem minmax(3rem,1fr) 3.8rem 2.7rem 2.7rem 2.7rem 3.9rem" : "2.2rem 1fr 4rem 2.6rem 2.6rem 2.6rem 3.4rem" };
-  const line = (r, me) => (
-    <div
-      key={r.num}
-      className={`${rowCls} px-1 py-0.5 ${me ? "rounded font-black" : "text-white"}`}
-      style={me ? { ...cols, color: "#000", backgroundColor: "#ffe600" } : cols}
-    >
-      <span>P{r.pos}</span>
-      <span className="truncate font-sans">
-        #{r.num} {r.team}
-      </span>
-      <span style={isBest(r.last, r.best) ? { color: me ? "#0033cc" : BLUE, fontWeight: 800 } : undefined}>{fmtMs(r.last)}</span>
-      <span style={isBest(r.s1, r.s1b) ? { color: me ? "#0033cc" : BLUE, fontWeight: 800 } : undefined}>{fmtSec1(r.s1)}</span>
-      <span style={isBest(r.s2, r.s2b) ? { color: me ? "#0033cc" : BLUE, fontWeight: 800 } : undefined}>{fmtSec1(r.s2)}</span>
-      <span style={isBest(r.s3, r.s3b) ? { color: me ? "#0033cc" : BLUE, fontWeight: 800 } : undefined}>{fmtSec1(r.s3)}</span>
-      <span className="text-right">
-        {me ? "" : (r.ahead ? "▲ " : "▼ ") + gapTxt(r)}
-      </span>
-    </div>
-  );
-  const tableEl = nb ? (
-        <div className="flex flex-col gap-0.5 pt-1 border-t border-white/10">
-          <div className={`${rowCls} px-1 text-white/60 uppercase`} style={cols}>
-            <span>Pos</span>
-            <span>Voiture</span>
-            <span>Tour</span>
-            <span>S1</span>
-            <span>S2</span>
-            <span>S3</span>
-            <span className="text-right">Écart</span>
-          </div>
-          {nb.above.map((r) => line(r, false))}
-          {line({ ...nb.me, num, ahead: false }, true)}
-          {nb.below.map((r) => line(r, false))}
-        </div>
-  ) : null;
+  const bothBtnProps = {
+    type: "button",
+    onClick: () => setBothOpen(true),
+    className: "rounded border border-white/40 bg-black/40 hover:bg-black/60 px-2 py-1 text-white font-black uppercase tracking-wide whitespace-nowrap font-sans",
+    title: "Classement (général ou catégorie) et voitures autour de nous sur la piste, dans une fenêtre déplaçable ou séparée",
+  };
+  const bothWindow = bothOpen
+    ? createPortal(
+        <BothWindow
+          cars={info.cars}
+          num={num}
+          now={now}
+          prio={prio}
+          myPos={live.pos}
+          lapEnd={info.cars[num] ? info.cars[num].lapEnd : null}
+          cl={cl}
+          setCl={setCl}
+          compute={(na, nb2) => aroundOnTrack(info.cars, num, now, undefined, undefined, na, nb2)}
+          getOuts={(since) => pitOutCars(info.cars, num, since)}
+          onClose={() => setBothOpen(false)}
+        />,
+        document.body
+      )
+    : null;
+  const tableEl = nb ? <button {...bothBtnProps}>☰ Classement et autour de nous</button> : null;
   if (part === "table")
     return nb ? (
       <div className={`rounded bg-black/80 px-2 py-1.5 flex flex-col gap-1 font-mono text-white ${tcls}`}>
-        <div className={`font-black uppercase tracking-wide text-white/70 font-sans ${tcls}`}>Classement autour de nous</div>
         {tableEl}
+        {bothWindow}
       </div>
     ) : null;
   return (
@@ -1407,19 +1493,15 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", 
                         </span>
                         <button
                           type="button"
-                          onClick={() => setAroundOpen(true)}
+                          onClick={() => setBothOpen(true)}
                           className="rounded border border-white/40 bg-black/40 hover:bg-black/60 px-2 py-0.5 text-white font-black uppercase tracking-wide whitespace-nowrap"
                           style={{ fontSize: fs(10) }}
-                          title="Voitures devant et derrière nous sur la piste, avec l'écart mesuré aux intermédiaires"
+                          title="Classement et voitures autour de nous sur la piste, avec l'écart mesuré aux intermédiaires"
                         >
-                          ☰ Autour de nous
+                          ☰ Classement / Autour de nous
                         </button>
                       </div>
-                      {aroundOpen &&
-                        createPortal(
-                          <AroundWindow lapEnd={info.cars[num] ? info.cars[num].lapEnd : null} getOuts={(since) => pitOutCars(info.cars, num, since)} compute={(na, nb, mode) => aroundOnTrack(info.cars, num, now, undefined, undefined, na, nb, mode)} prio={prio} myPos={live.pos} now={now} onClose={() => setAroundOpen(false)} />,
-                          document.body
-                        )}
+                      {bothWindow}
                       {genRows.length === 0 && <span className="text-white/60 font-sans px-1" style={{ fontSize: fs(11) }}>Aucun équipage concerné pour le moment</span>}
                       {shown.map(zRow)}
                       {rest.length > 0 && (
@@ -5145,7 +5227,7 @@ export default function PitBoard() {
                   return (
                     <FitToScreen>
                     {topBar}
-                    <div className="w-full grid gap-2 items-start rounded-2xl bg-black/65 p-2 grid-cols-1 lg:grid-cols-[58%_minmax(0,1fr)] xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.3fr)_minmax(0,1.1fr)]">
+                    <div className="w-full grid gap-2 items-start rounded-2xl bg-black/65 p-2 grid-cols-1 lg:grid-cols-[58%_minmax(0,1fr)] xl:grid-cols-[minmax(0,0.8fr)_minmax(0,1.5fr)_minmax(0,1.3fr)]">
                       <div className="w-full order-2 lg:order-1">{carTiles.map((t) => renderTile(t))}</div>
                       {myLive && (
                         <div className="hidden xl:block order-2 sticky top-0">
@@ -5154,11 +5236,11 @@ export default function PitBoard() {
                       )}
                       <div className="order-1 lg:order-3 max-lg:contents lg:sticky lg:top-0 lg:flex lg:flex-col lg:gap-2">
                         {hasVideo ? (
-                          <div className="w-full max-w-[460px] max-lg:max-w-[260px] max-lg:mx-auto max-lg:sticky max-lg:top-0 max-lg:z-30 max-lg:order-1 rounded-2xl bg-neutral-900/95 p-2 shadow-lg">
+                          <div className="w-full max-w-[560px] max-lg:max-w-[260px] max-lg:mx-auto max-lg:sticky max-lg:top-0 max-lg:z-30 max-lg:order-1 rounded-2xl bg-neutral-900/95 p-2 shadow-lg">
                             <CarVideo url={vurl} always />
                           </div>
                         ) : (
-                          <div className="max-lg:hidden w-full max-w-[460px] rounded-2xl bg-neutral-900/70 border border-white/15 p-2 shadow-lg">
+                          <div className="max-lg:hidden w-full max-w-[560px] rounded-2xl bg-neutral-900/70 border border-white/15 p-2 shadow-lg">
                             <div className="w-full flex items-center justify-center text-center text-white/45 text-xs font-semibold px-4" style={{ aspectRatio: "16 / 9" }}>
                               Fenêtre vidéo vide : ajoutez le lien MyRacesLive dans « Configuration des voitures »
                             </div>
