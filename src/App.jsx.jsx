@@ -848,54 +848,91 @@ function FitLine({ children, max = 16, min = 8, className = "", style }) {
   );
 }
 
-// Contenu du tableau « autour de nous » : les voitures devant et derrière nous SUR LA PISTE, avec l'écart exact mesuré au dernier point commun
-function AroundTable({ data, prio, myPos, now, stale, nA, nB, setNA, setNB, outs }) {
-  const hasCls = !!data && [...data.ahead, ...data.behind].some((r) => r.cat);
-  const cols = { gridTemplateColumns: hasCls ? "2.4rem 3.2rem 4.2rem 2.6rem minmax(0,1fr) 6.2rem 7.5rem 4.6rem 8.6rem 3.8rem" : "2.4rem 3.2rem minmax(0,1fr) 6.2rem 7.5rem 4.6rem 8.6rem 3.8rem" };
+// Contenu du tableau « autour de nous » : voisins sur la piste, au classement général ou dans la classe (PIC), avec l'écart mesuré au dernier point commun
+function AroundTable({ data, prio, myPos, now, stale, nA, nB, setNA, setNB, outs, mode, setMode, showLaps, setShowLaps, outDelay, setOutDelay }) {
+  const rowsAll = data ? [...data.ahead, ...data.behind] : [];
+  const hasCls = rowsAll.some((r) => r.cat);
+  const byClass = mode !== "piste";
+  const colList = [["2.4rem", "Pos"], ["3.2rem", "N°"]];
+  if (hasCls) colList.push(["4.2rem", "Classe"], ["2.6rem", "PIC"]);
+  colList.push(["minmax(0,1fr)", "Équipe"]);
+  if (showLaps) colList.push(["3.6rem", "Tours"]);
+  colList.push(["6.6rem", "Écart"], ["5.6rem", "Gain/perte"], ["4.6rem", "Moy. 10 t."], ["8.4rem", "Rythme vs nous"], ["3.8rem", "Estim."]);
+  const cols = { gridTemplateColumns: colList.map((c) => c[0]).join(" ") };
   const fmtAvg = (ms) => (ms == null ? "–" : `${Math.floor(ms / 60000)}:${((ms % 60000) / 1000).toFixed(1).padStart(4, "0")}`);
+  const eta = (n) => {
+    const d = (prio || []).find((x) => x.num === n);
+    return d ? fmtCountdown(d.remainingMs) : "";
+  };
   const pace = (r, tinted) => {
     if (r.deltaMs == null) return <span className={tinted ? "" : "text-white/40"}>–</span>;
     const d = r.deltaMs / 1000;
     if (Math.abs(d) < 0.05) return <span>= même rythme</span>;
     return d < 0 ? <span style={tinted ? undefined : { color: "#f87171" }}>{Math.abs(d).toFixed(1)} s/tr plus vite</span> : <span style={tinted ? undefined : { color: "#4ade80" }}>{d.toFixed(1)} s/tr plus lent</span>;
   };
-  const eta = (n) => {
-    const d = (prio || []).find((x) => x.num === n);
-    return d ? fmtCountdown(d.remainingMs) : "";
+  // gain / perte sur le dernier tronçon : vert + = nous étions plus rapides, rouge − = nous étions plus lents
+  const gain = (r) => {
+    if (r.gainMs == null) return <span className="text-white/40">–</span>;
+    const g = r.gainMs / 1000;
+    if (Math.abs(g) < 0.05) return <span className="rounded px-1.5 bg-white/20 text-white font-black">0.0 s</span>;
+    return g > 0 ? (
+      <span className="rounded px-1.5 bg-green-600 text-white font-black">+{g.toFixed(1)} s</span>
+    ) : (
+      <span className="rounded px-1.5 bg-red-600 text-white font-black">−{Math.abs(g).toFixed(1)} s</span>
+    );
   };
-  const trend = (r, tinted) => {
-    if (r.trendMs == null) return <span className={tinted ? "" : "text-white/40"}>–</span>;
-    if (r.trendMs < -300) return <span style={tinted ? undefined : { color: "#38bdf8" }}>↘ se rapproche {fmtGapMs(-r.trendMs)}</span>;
-    if (r.trendMs > 300) return <span className={tinted ? "" : "text-white/60"}>↗ s'éloigne {fmtGapMs(r.trendMs)}</span>;
-    return <span className={tinted ? "" : "text-white/60"}>= stable</span>;
-  };
-  // devant nous sur la piste mais derrière au général = vert fluo ; derrière nous sur la piste mais devant au général = rouge
-  const tint = (r, key) => (myPos == null ? null : key === "a" && r.pos > myPos ? "green" : key === "b" && r.pos < myPos ? "red" : null);
+  const lapsTxt = (r) => (r.lapsDiff == null ? "" : r.lapsDiff === 0 ? "=" : `${r.lapsDiff > 0 ? "+" : "−"}${Math.abs(r.lapsDiff)} t`);
+  // sur la piste : devant nous sur la piste mais derrière au général = vert fluo ; derrière nous sur la piste mais devant au général = rouge
+  const tint = (r, key) => (byClass || myPos == null ? null : key === "a" && r.pos > myPos ? "green" : key === "b" && r.pos < myPos ? "red" : null);
   const row = (r, key) => {
     const t = tint(r, key);
     const cls = t === "green" ? "text-black bg-[#39ff14] font-bold" : t === "red" ? "text-white bg-red-600 font-bold" : "text-white";
     const sub = t === "green" ? "text-black/70" : "text-white/60";
     return (
-    <div key={key + r.num} className={`grid items-center gap-2 px-2 py-0.5 font-sans border-b border-white/10 ${cls}`} style={{ ...cols, fontSize: 12 }}>
-      <span className={sub}>P{r.pos}</span>
-      <span className="font-black">#{r.num}</span>
-      {hasCls && <span className={`truncate ${t ? "" : "text-white/80"}`}>{r.cat}</span>}
-      {hasCls && <span className="font-mono tabular-nums font-black">{r.pic != null ? `${r.pic}e` : ""}</span>}
-      <span className="truncate">{r.team}</span>
-      <span className="font-mono tabular-nums font-black text-right">
-        {fmtGapMs(Math.abs(r.gapMs))} <span className={`font-sans font-normal ${t ? "opacity-70" : "text-white/50"}`}>{r.point}</span>
-      </span>
-      <span>{trend(r, !!t)}</span>
-      <span className="font-mono tabular-nums text-right">{fmtAvg(r.avgMs)}</span>
-      <span>{pace(r, !!t)}</span>
-      <span className="font-mono tabular-nums font-black text-right">{eta(r.num)}</span>
-    </div>
+      <div key={key + r.num} className={`grid items-center gap-2 px-2 py-0.5 font-sans border-b border-white/10 ${cls}`} style={{ ...cols, fontSize: 12 }}>
+        <span className={sub}>P{r.pos}</span>
+        <span className="font-black">#{r.num}</span>
+        {hasCls && <span className={`truncate ${t ? "" : "text-white/80"}`}>{r.cat}</span>}
+        {hasCls && <span className={`font-mono tabular-nums font-black ${mode === "pic" ? "text-yellow-300" : ""}`}>{r.pic != null ? `${r.pic}e` : ""}</span>}
+        <span className="truncate">{r.team}</span>
+        {showLaps && <span className="font-mono tabular-nums">{lapsTxt(r)}</span>}
+        <span className="font-mono tabular-nums font-black text-right">
+          {r.gapMs == null ? (
+            <span className="text-white/50 font-sans font-normal">{r.pit ? "stand" : "–"}</span>
+          ) : (
+            <>
+              {byClass && <span className="font-sans font-normal">{r.gapMs < 0 ? "↗ " : "↘ "}</span>}
+              {fmtGapMs(Math.abs(r.gapMs))} <span className={`font-sans font-normal ${t ? "opacity-70" : "text-white/50"}`}>{r.point}</span>
+            </>
+          )}
+        </span>
+        <span>{gain(r)}</span>
+        <span className="font-mono tabular-nums text-right">{fmtAvg(r.avgMs)}</span>
+        <span>{pace(r, !!t)}</span>
+        <span className="font-mono tabular-nums font-black text-right">{eta(r.num)}</span>
+      </div>
     );
   };
   const band = (txt, extra) => <div className={`px-2 py-0.5 font-black uppercase tracking-wide text-xs ${extra}`}>{txt}</div>;
   if (!data) return <div className="text-white/70 font-sans text-sm p-2">Pas encore assez de données (il faut quelques tours de notre voiture).</div>;
   const ref = data.ref;
   const refAge = ref ? Math.max(0, Math.round((now - ref.at) / 1000)) : null;
+  const what = mode === "pic" ? "dans notre classe (PIC)" : mode === "general" ? "au classement général" : "sur la piste";
+  const chip = (id, label) => (
+    <button key={id} type="button" onClick={() => setMode(id)} className={`rounded px-2 py-0.5 font-black text-xs border ${mode === id ? "bg-yellow-400 text-black border-yellow-400" : "bg-black/40 text-white border-white/30"}`}>
+      {label}
+    </button>
+  );
+  const sel = (lbl, v, set) => (
+    <label key={lbl} className="flex items-center gap-1">
+      <span className="font-black uppercase">{lbl}</span>
+      <select value={v} onChange={(e) => set(Number(e.target.value))} className="rounded bg-black/60 border border-white/30 px-1 py-0.5 text-white">
+        {[3, 5, 10, 15, 25, 40, 60, 80, 115].map((n) => (
+          <option key={n} value={n}>{n} voitures</option>
+        ))}
+      </select>
+    </label>
+  );
   return (
     <div>
       {ref && (
@@ -916,11 +953,14 @@ function AroundTable({ data, prio, myPos, now, stale, nA, nB, setNA, setNB, outs
       </div>
       {outs && (
         <div className="rounded border border-sky-400/70 bg-sky-500/10 px-2 py-1 mb-1 text-white font-sans text-xs">
-          <div className="font-black uppercase text-sky-300">
-            Sortis des stands {outs.list.length ? `(${outs.list.length})` : ""}
-            <span className="text-white/60 normal-case font-normal">
-              {outs.wait > 0 ? ` · liste précédente, mise à jour dans ${outs.wait} s` : " · relevé 15 s après notre passage de la ligne"}
-            </span>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className="font-black uppercase text-sky-300">Sortis des stands {outs.list.length ? `(${outs.list.length})` : ""}</span>
+            <label className="flex items-center gap-1 text-white/80">
+              relevé
+              <input type="number" min={0} max={120} value={outDelay} onChange={(e) => setOutDelay(Math.max(0, Math.min(120, Number(e.target.value) || 0)))} className="w-14 rounded bg-black/60 border border-white/30 px-1 py-0.5 text-white" />
+              s après notre passage de la ligne
+            </label>
+            {outs.wait > 0 && <span className="text-white/60">liste précédente, mise à jour dans {outs.wait} s</span>}
           </div>
           {outs.list.length === 0 && <div className="text-white/60">Aucune voiture sortie des stands</div>}
           {outs.list.map((r) => (
@@ -934,30 +974,43 @@ function AroundTable({ data, prio, myPos, now, stale, nA, nB, setNA, setNB, outs
           ))}
         </div>
       )}
+      {!outs && (
+        <div className="rounded border border-sky-400/40 px-2 py-1 mb-1 text-white/70 font-sans text-xs flex items-center gap-2">
+          Sortis des stands : relevé
+          <input type="number" min={0} max={120} value={outDelay} onChange={(e) => setOutDelay(Math.max(0, Math.min(120, Number(e.target.value) || 0)))} className="w-14 rounded bg-black/60 border border-white/30 px-1 py-0.5 text-white" />
+          s après notre passage de la ligne
+        </div>
+      )}
       <div className="flex flex-wrap items-center gap-3 px-2 pb-1 text-white font-sans text-xs">
-        {[["Devant", nA, setNA], ["Derrière", nB, setNB]].map(([lbl, v, set]) => (
-          <label key={lbl} className="flex items-center gap-1">
-            <span className="font-black uppercase">{lbl}</span>
-            <select value={v} onChange={(e) => set(Number(e.target.value))} className="rounded bg-black/60 border border-white/30 px-1 py-0.5 text-white">
-              {[3, 5, 10, 15, 25, 40, 60].map((n) => (
-                <option key={n} value={n}>{n} voitures</option>
-              ))}
-            </select>
-          </label>
-        ))}
+        <span className="flex items-center gap-1">
+          <span className="font-black uppercase">Voisins</span>
+          {chip("piste", "Sur la piste")}
+          {chip("general", "Général")}
+          {chip("pic", "PIC")}
+        </span>
+        <label className="flex items-center gap-1 cursor-pointer">
+          <input type="checkbox" checked={showLaps} onChange={(e) => setShowLaps(e.target.checked)} />
+          <span className="font-black uppercase">Tours</span>
+        </label>
+        {sel("Devant", nA, setNA)}
+        {sel("Derrière", nB, setNB)}
       </div>
       <div className="text-white/60 font-sans text-xs px-2 pb-1">
-        Écart mesuré au dernier point (S1, S2 ou ligne) franchi par la voiture et par nous. Estimation = compte à rebours avant le dépassement quand il est prévu.
+        Écart mesuré au dernier point (S1, S2 ou ligne) franchi par la voiture et par nous, remis à jour à chaque point.{" "}
+        {byClass ? "↗ = elle est passée avant nous au point, ↘ = après nous. " : ""}
+        Gain/perte = temps pris ou perdu sur elle dans le dernier tronçon (vert + : nous étions plus rapides ; rouge − : plus lents). Estimation = compte à rebours avant le dépassement quand il est prévu.
       </div>
       <div className="grid gap-2 px-2 pb-0.5 text-white/50 font-sans font-black uppercase" style={{ ...cols, fontSize: 10 }}>
-        <span>Pos</span><span>N°</span>{hasCls && <span>Classe</span>}{hasCls && <span>PIC</span>}<span>Équipe</span><span className="text-right">Écart</span><span>Tendance</span><span className="text-right">Moy. 10 t.</span><span>Rythme vs nous</span><span className="text-right">Estim.</span>
+        {colList.map((c, i) => (
+          <span key={i} className={["Écart", "Moy. 10 t.", "Estim."].includes(c[1]) ? "text-right" : ""}>{c[1]}</span>
+        ))}
       </div>
-      {band(`↗ Devant nous (${data.ahead.length})`, "bg-white/10 text-white")}
-      {data.ahead.length === 0 && <div className="px-2 py-1 text-white/50 text-xs">Aucune voiture devant sur ce tour</div>}
+      {band(`↗ Devant nous ${what} (${data.ahead.length})`, "bg-white/10 text-white")}
+      {data.ahead.length === 0 && <div className="px-2 py-1 text-white/50 text-xs">Aucune voiture devant</div>}
       {data.ahead.map((r) => row(r, "a"))}
       {band(`NOUS · P${myPos ?? "?"}${data.me && data.me.cat ? ` · ${data.me.cat} · ${data.me.pic}e de la classe` : ""}`, "bg-yellow-400 text-black")}
-      {band(`↘ Derrière nous (${data.behind.length})`, "bg-white/10 text-white")}
-      {data.behind.length === 0 && <div className="px-2 py-1 text-white/50 text-xs">Aucune voiture derrière sur ce tour</div>}
+      {band(`↘ Derrière nous ${what} (${data.behind.length})`, "bg-white/10 text-white")}
+      {data.behind.length === 0 && <div className="px-2 py-1 text-white/50 text-xs">Aucune voiture derrière</div>}
       {data.behind.map((r) => row(r, "b"))}
     </div>
   );
@@ -986,7 +1039,7 @@ function FloatingPanel({ title, onClose, onPopout, children }) {
   };
   const clamp = (p) => ({ x: Math.min(Math.max(0, p.x), Math.max(0, window.innerWidth - 140)), y: Math.min(Math.max(0, p.y), Math.max(0, window.innerHeight - 40)) });
   const snap = (side) => {
-    const w = box.current ? box.current.offsetWidth : 940;
+    const w = box.current ? box.current.offsetWidth : 1000;
     const p = clamp({ x: side === "left" ? 8 : window.innerWidth - w - 8, y: pos.y });
     setPos(p);
     save(p);
@@ -1008,7 +1061,7 @@ function FloatingPanel({ title, onClose, onPopout, children }) {
     <div
       ref={box}
       className="fixed z-50 flex flex-col rounded-xl border border-white/30 bg-neutral-900/95 shadow-2xl"
-      style={{ left: pos.x, top: pos.y, width: "min(940px, calc(100vw - 16px))", maxHeight: "calc(100vh - 16px)" }}
+      style={{ left: pos.x, top: pos.y, width: "min(1000px, calc(100vw - 16px))", maxHeight: "calc(100vh - 16px)", minWidth: 420, resize: "both", overflow: "hidden" }}
     >
       <div
         className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-white/10 cursor-move select-none touch-none"
@@ -1032,32 +1085,40 @@ function FloatingPanel({ title, onClose, onPopout, children }) {
 
 // « Autour de nous » : fenêtre flottante déplaçable, ou fenêtre séparée du navigateur (par exemple sur un autre écran)
 function AroundWindow({ compute, getOuts, lapEnd, prio, myPos, now, onClose }) {
-  const getN = (k, d) => {
+  const getS = (k, d) => {
     try {
-      const v = Number(localStorage.getItem(k));
-      return v > 0 ? v : d;
+      const v = localStorage.getItem(k);
+      return v == null ? d : v;
     } catch {
       return d;
     }
   };
-  const [nA, setNAraw] = useState(() => getN("pitboard_around_ahead", 25));
-  const [nB, setNBraw] = useState(() => getN("pitboard_around_behind", 15));
-  const setN = (k, set) => (v) => {
-    set(v);
+  const putS = (k, v) => {
     try {
       localStorage.setItem(k, String(v));
     } catch {
       /* stockage indisponible */
     }
   };
-  const setNA = setN("pitboard_around_ahead", setNAraw);
-  const setNB = setN("pitboard_around_behind", setNBraw);
-  const data = compute(nA, nB);
-  // voitures sorties des stands : relevé figé 15 s après chacun de nos passages de ligne (S3 / S/F)
+  const [nA, setNAraw] = useState(() => Number(getS("pitboard_around_ahead", 25)) || 25);
+  const [nB, setNBraw] = useState(() => Number(getS("pitboard_around_behind", 15)) || 15);
+  const [mode, setModeRaw] = useState(() => (["piste", "general", "pic"].includes(getS("pitboard_around_mode", "piste")) ? getS("pitboard_around_mode", "piste") : "piste"));
+  const [showLaps, setShowLapsRaw] = useState(() => getS("pitboard_around_laps", "0") === "1");
+  const [outDelay, setOutDelayRaw] = useState(() => {
+    const v = Number(getS("pitboard_around_outdelay", 15));
+    return Number.isFinite(v) && v >= 0 ? v : 15;
+  });
+  const setNA = (v) => { setNAraw(v); putS("pitboard_around_ahead", v); };
+  const setNB = (v) => { setNBraw(v); putS("pitboard_around_behind", v); };
+  const setMode = (v) => { setModeRaw(v); putS("pitboard_around_mode", v); };
+  const setShowLaps = (v) => { setShowLapsRaw(v); putS("pitboard_around_laps", v ? "1" : "0"); };
+  const setOutDelay = (v) => { setOutDelayRaw(v); putS("pitboard_around_outdelay", v); };
+  const data = compute(nA, nB, mode);
+  // voitures sorties des stands : relevé figé N secondes après chacun de nos passages de ligne (S3 / S/F)
   const outSnap = useRef(null);
   const sinceLine = lapEnd != null ? now - lapEnd : null;
-  if (lapEnd != null && sinceLine >= 15000 && (!outSnap.current || outSnap.current.lapEnd !== lapEnd)) outSnap.current = { lapEnd, at: now, list: getOuts(lapEnd - 30000) };
-  const outs = outSnap.current ? { ...outSnap.current, wait: outSnap.current.lapEnd === lapEnd ? 0 : Math.max(0, Math.ceil((15000 - (sinceLine ?? 0)) / 1000)) } : null;
+  if (lapEnd != null && sinceLine >= outDelay * 1000 && (!outSnap.current || outSnap.current.lapEnd !== lapEnd || outSnap.current.delay !== outDelay)) outSnap.current = { lapEnd, delay: outDelay, at: now, list: getOuts(lapEnd - 30000) };
+  const outs = outSnap.current ? { ...outSnap.current, wait: outSnap.current.lapEnd === lapEnd ? 0 : Math.max(0, Math.ceil((outDelay * 1000 - (sinceLine ?? 0)) / 1000)) } : null;
   const last = useRef(null);
   if (data) last.current = { data, at: now };
   const shown = data || (last.current && last.current.data) || null; // on garde le dernier tableau valide si le calcul est momentanément impossible
@@ -1079,7 +1140,7 @@ function AroundWindow({ compute, getOuts, lapEnd, prio, myPos, now, onClose }) {
     };
   }, [popup]);
   const openPopup = () => {
-    const w = window.open("", "pitboard_autour", "popup=yes,width=1000,height=900,left=40,top=40");
+    const w = window.open("", "pitboard_autour", "popup=yes,width=1100,height=900,left=40,top=40");
     if (!w) {
       setMsg("La fenêtre séparée a été bloquée par le navigateur : autorisez les pop-ups pour ce site, puis réessayez.");
       return;
@@ -1095,10 +1156,10 @@ function AroundWindow({ compute, getOuts, lapEnd, prio, myPos, now, onClose }) {
     w.document.body.appendChild(root);
     setPopup({ w, root });
   };
-  const table = <AroundTable data={shown} prio={prio} myPos={myPos} now={now} stale={stale} nA={nA} nB={nB} setNA={setNA} setNB={setNB} outs={outs} />;
+  const table = <AroundTable data={shown} prio={prio} myPos={myPos} now={now} stale={stale} nA={nA} nB={nB} setNA={setNA} setNB={setNB} outs={outs} mode={mode} setMode={setMode} showLaps={showLaps} setShowLaps={setShowLaps} outDelay={outDelay} setOutDelay={setOutDelay} />;
   if (popup) return createPortal(<div className="bg-neutral-900 p-2 min-h-screen">{table}</div>, popup.root);
   return (
-    <FloatingPanel title="Autour de nous sur la piste" onClose={onClose} onPopout={openPopup}>
+    <FloatingPanel title="Autour de nous" onClose={onClose} onPopout={openPopup}>
       {msg && <div className="rounded bg-red-500/20 border border-red-400/60 px-2 py-1 mb-1 text-red-200 font-sans text-xs">{msg}</div>}
       {table}
     </FloatingPanel>
@@ -1356,7 +1417,7 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", 
                       </div>
                       {aroundOpen &&
                         createPortal(
-                          <AroundWindow lapEnd={info.cars[num] ? info.cars[num].lapEnd : null} getOuts={(since) => pitOutCars(info.cars, num, since)} compute={(na, nb) => aroundOnTrack(info.cars, num, now, undefined, undefined, na, nb)} prio={prio} myPos={live.pos} now={now} onClose={() => setAroundOpen(false)} />,
+                          <AroundWindow lapEnd={info.cars[num] ? info.cars[num].lapEnd : null} getOuts={(since) => pitOutCars(info.cars, num, since)} compute={(na, nb, mode) => aroundOnTrack(info.cars, num, now, undefined, undefined, na, nb, mode)} prio={prio} myPos={live.pos} now={now} onClose={() => setAroundOpen(false)} />,
                           document.body
                         )}
                       {genRows.length === 0 && <span className="text-white/60 font-sans px-1" style={{ fontSize: fs(11) }}>Aucun équipage concerné pour le moment</span>}

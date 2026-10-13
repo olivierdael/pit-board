@@ -459,7 +459,7 @@ export function classPositions(cars) {
 // Les voitures autour de nous SUR LA PISTE, avec l'écart mesuré au dernier point commun (S1, S2 ou ligne).
 // renvoie { ahead: [...], behind: [...], me: { cat, pic }, ref: { point, at } (notre dernier point de chronométrage et son heure) } : ahead = jusqu'à nAhead voitures devant (la plus éloignée d'abord), behind = jusqu'à nBehind derrière (la plus proche d'abord).
 // ligne : { num, team, pos, cat (classe), pic (position dans la classe), gapMs (> 0 : derrière nous), point ("S1" | "S2" | "Ligne"), trendMs (variation de |écart| depuis le point précédent : < 0 = se rapproche, null si inconnu) }
-export function aroundOnTrack(cars, myNum, nowMs, store = paceStore, hist = lapStore, nAhead = 25, nBehind = 15) {
+export function aroundOnTrack(cars, myNum, nowMs, store = paceStore, hist = lapStore, nAhead = 25, nBehind = 15, mode = "piste") {
   const me = cars && cars[myNum];
   if (!me || me.lapEnd == null || OFF_TRACK.test(me.state || "")) return null;
   const mySec = expectedSectors(myNum, me, me, store, hist);
@@ -470,22 +470,31 @@ export function aroundOnTrack(cars, myNum, nowMs, store = paceStore, hist = lapS
   if (a < 1) return null; // les écarts déjà mesurés restent exacts même si nous sommes un peu en retard sur notre prochain point
   const cls = classPositions(cars);
   const myAvg = lapAverage(myNum, hist);
+  const byClass = mode === "general" || mode === "pic"; // voisins du classement (général ou dans la classe) au lieu des voisins sur la piste
   const rows = [];
   for (const num of Object.keys(cars)) {
     if (num === myNum) continue;
     const c = cars[num];
-    if (!c || c.lapEnd == null || OFF_TRACK.test(c.state || "")) continue;
+    if (!c) continue;
+    const base = { num, team: c.team, pos: c.pos, cat: (cls[num] || {}).cat || "", pic: (cls[num] || {}).pic ?? null, lapsDiff: c.laps != null && me.laps != null ? c.laps - me.laps : null, gapMs: null, point: null, trendMs: null, gainMs: null, avgMs: null, deltaMs: null, pit: false };
+    const xAvg = lapAverage(num, hist);
+    base.avgMs = xAvg ? xAvg.ms : null;
+    base.deltaMs = xAvg && myAvg ? xAvg.ms - myAvg.ms : null;
+    const noMeas = (pit) => {
+      if (byClass && c.pos != null) rows.push({ ...base, pit });
+    };
+    if (c.lapEnd == null || OFF_TRACK.test(c.state || "")) { noMeas(true); continue; }
     const xSec = expectedSectors(num, c, me, store, hist);
-    if (!xSec) continue;
+    if (!xSec) { noMeas(false); continue; }
     const xPts = pointTimeline(num, c, nowMs, xSec, hist);
     const b = xPts.length - 1;
-    if (b < 0) continue;
+    if (b < 0) { noMeas(false); continue; }
     // tableau d'affichage : l'écart déjà mesuré reste exact même si la voiture est en retard (drapeau jaune, neutralisation) ; on n'écarte que les voitures sans nouvelles depuis 4 tours
-    if (nowMs - xPts[b].t > 4 * (xSec[0] + xSec[1] + xSec[2])) continue;
+    if (nowMs - xPts[b].t > 4 * (xSec[0] + xSec[1] + xSec[2])) { noMeas(false); continue; }
     const cp = lastCommonPoint(myPts, a, xPts, myLap, true); // l'écart mesuré entre deux heures de passage reste exact même sur un tour de stand
-    if (!cp) continue;
+    if (!cp) { noMeas(false); continue; }
     const g0 = xPts[cp.bi].t - myPts[cp.ai].t;
-    if (g0 === 0) continue;
+    if (g0 === 0 && !byClass) continue;
     let trendMs = null;
     for (let j = cp.ai - 1; j >= 0 && j >= cp.ai - 2; j--) {
       const xi = nearestSame(xPts, myPts[j].k, myPts[j].t, 0.45 * myLap);
@@ -494,13 +503,32 @@ export function aroundOnTrack(cars, myNum, nowMs, store = paceStore, hist = lapS
       if (Math.sign(gp) === Math.sign(g0)) trendMs = Math.abs(g0) - Math.abs(gp);
       break;
     }
-    const xAvg = lapAverage(num, hist);
-    rows.push({ num, team: c.team, pos: c.pos, cat: (cls[num] || {}).cat || "", pic: (cls[num] || {}).pic ?? null, gapMs: g0, point: ["S1", "S2", "Ligne"][myPts[cp.ai].k], trendMs, avgMs: xAvg ? xAvg.ms : null, deltaMs: xAvg && myAvg ? xAvg.ms - myAvg.ms : null });
+    // gain / perte sur le dernier tronçon (entre le point précédent et le dernier point commun) : > 0 = nous avons été plus rapides que cette voiture
+    let gainMs = null;
+    if (cp.ai >= 1 && cp.bi >= 1) {
+      const pj = myPts[cp.ai - 1];
+      const xi = nearestSame(xPts, pj.k, pj.t, 0.45 * myLap);
+      if (xi === cp.bi - 1 && !pj.bad && !myPts[cp.ai].bad && !xPts[xi].bad && !xPts[cp.bi].bad) {
+        gainMs = g0 - (xPts[xi].t - pj.t);
+        if (Math.abs(gainMs) > 20000) gainMs = null; // tronçons non comparables (tours différents) : pas d'affichage
+      }
+    }
+    rows.push({ ...base, gapMs: g0, point: ["S1", "S2", "Ligne"][myPts[cp.ai].k], trendMs, gainMs });
   }
-  const ahead = rows.filter((r) => r.gapMs < 0).sort((x, y) => Math.abs(x.gapMs) - Math.abs(y.gapMs)).slice(0, nAhead).reverse();
-  const behind = rows.filter((r) => r.gapMs > 0).sort((x, y) => x.gapMs - y.gapMs).slice(0, nBehind);
+  let ahead, behind;
+  if (byClass) {
+    const key = mode === "pic" ? "pic" : "pos";
+    const myKey = mode === "pic" ? (cls[myNum] || {}).pic : me.pos;
+    const myCat = (cls[myNum] || {}).cat;
+    const pool = rows.filter((r) => r[key] != null && (mode !== "pic" || r.cat === myCat));
+    ahead = pool.filter((r) => r[key] < myKey).sort((x, y) => y[key] - x[key]).slice(0, nAhead).reverse();
+    behind = pool.filter((r) => r[key] > myKey).sort((x, y) => x[key] - y[key]).slice(0, nBehind);
+  } else {
+    ahead = rows.filter((r) => r.gapMs < 0).sort((x, y) => Math.abs(x.gapMs) - Math.abs(y.gapMs)).slice(0, nAhead).reverse();
+    behind = rows.filter((r) => r.gapMs > 0).sort((x, y) => x.gapMs - y.gapMs).slice(0, nBehind);
+  }
   if (!ahead.length && !behind.length) return null; // rien de mesurable (voiture à l'arrêt, flux interrompu) : l'écran garde le dernier tableau valide
-  return { ahead, behind, me: cls[myNum] || null, myAvg, ref: { point: ["S1", "S2", "Ligne"][myPts[a].k], at: myPts[a].t } };
+  return { ahead, behind, mode, me: cls[myNum] || null, myAvg, ref: { point: ["S1", "S2", "Ligne"][myPts[a].k], at: myPts[a].t } };
 }
 
 function duelEstimatesPoints(cars, myNum, remainingMs, store, nowMs, hist = lapStore) {
