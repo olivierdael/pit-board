@@ -111,9 +111,20 @@ export function visibleRcMessages(rc, wanted, nowMs, seen, dismissed, generatedA
 const paceStore = {};
 
 // enregistre le dernier tour de chaque voiture (une seule fois par numéro de tour)
-export function updatePace(cars, store = paceStore, hist = lapStore) {
+export function updatePace(cars, store = paceStore, hist = lapStore, nowMs = Date.now(), outs = outStore) {
   for (const num of Object.keys(cars || {})) {
     const c = cars[num];
+    if (c) {
+      // sorties des stands : passage d'un état stand / « OUT » à un état piste (heure du client)
+      const st = c.state || "";
+      const o = outs[num] || (outs[num] = { off: false, out: false, at: null, seen: false });
+      const isOut = /OUT/i.test(st);
+      const isOff = OFF_TRACK.test(st);
+      if (o.seen && ((isOut && !o.out) || (o.off && !isOff)) && (o.at == null || nowMs - o.at > 120000)) o.at = nowMs;
+      o.off = isOff;
+      o.out = isOut;
+      o.seen = true;
+    }
     if (!c || c.last == null || c.laps == null) continue;
     const e = store[num] || (store[num] = { lastLap: null, times: [] });
     if (e.lastLap === c.laps) continue;
@@ -125,12 +136,38 @@ export function updatePace(cars, store = paceStore, hist = lapStore) {
       const h = hist[num] || (hist[num] = []);
       const sOk = c.s1 != null && c.s2 != null && c.s3 != null && Math.abs(c.s1 + c.s2 + c.s3 - c.last) <= 0.03 * c.last;
       h.push({ end: c.lapEnd, lt: c.last, s: sOk ? [c.s1, c.s2, c.s3] : null });
-      if (h.length > 8) h.shift();
+      if (h.length > 12) h.shift();
     }
   }
 }
 // derniers tours terminés de chaque voiture : { end (heure du passage de la ligne), lt (temps du tour), s ([S1,S2,S3] ou null) }
 const lapStore = {};
+const outStore = {}; // { num: { off, out, at (heure de la dernière sortie des stands), seen } }
+
+// temps moyen sur les 10 derniers tours, en écartant les tours plus de 5 % plus lents que cette moyenne (stand, neutralisation, incident) : { ms, n } ou null
+export function lapAverage(num, hist = lapStore) {
+  const laps = (hist[num] || []).slice(-10).map((h) => h.lt).filter((v) => v > 0);
+  if (laps.length < 3) return null;
+  const m = laps.reduce((a, b) => a + b, 0) / laps.length;
+  const kept = laps.filter((v) => v <= 1.05 * m);
+  if (kept.length < 3) return null;
+  return { ms: kept.reduce((a, b) => a + b, 0) / kept.length, n: kept.length };
+}
+
+// voitures apparues en « out » des stands depuis sinceMs (la plus récente d'abord) : [{ num, team, pos, cat, pic, at, avgMs }]
+export function pitOutCars(cars, myNum, sinceMs, outs = outStore, hist = lapStore) {
+  const cls = classPositions(cars);
+  const res = [];
+  for (const num of Object.keys(outs)) {
+    const o = outs[num];
+    const c = cars && cars[num];
+    if (num === myNum || !c || o.at == null || o.at < sinceMs) continue;
+    if (OFF_TRACK.test(c.state || "") && !/OUT/i.test(c.state || "")) continue; // revenue aux stands entre-temps
+    const a = lapAverage(num, hist);
+    res.push({ num, team: c.team, pos: c.pos, cat: (cls[num] || {}).cat || "", pic: (cls[num] || {}).pic ?? null, at: o.at, avgMs: a ? a.ms : null });
+  }
+  return res.sort((x, y) => y.at - x.at);
+}
 
 // rythme (ms/tour) = médiane des derniers tours "normaux" (on écarte les tours > 115 % du meilleur : stand, neutralisation)
 export function paceOf(num, car, store = paceStore) {
@@ -432,6 +469,7 @@ export function aroundOnTrack(cars, myNum, nowMs, store = paceStore, hist = lapS
   const a = myPts.length - 1;
   if (a < 1) return null; // les écarts déjà mesurés restent exacts même si nous sommes un peu en retard sur notre prochain point
   const cls = classPositions(cars);
+  const myAvg = lapAverage(myNum, hist);
   const rows = [];
   for (const num of Object.keys(cars)) {
     if (num === myNum) continue;
@@ -456,12 +494,13 @@ export function aroundOnTrack(cars, myNum, nowMs, store = paceStore, hist = lapS
       if (Math.sign(gp) === Math.sign(g0)) trendMs = Math.abs(g0) - Math.abs(gp);
       break;
     }
-    rows.push({ num, team: c.team, pos: c.pos, cat: (cls[num] || {}).cat || "", pic: (cls[num] || {}).pic ?? null, gapMs: g0, point: ["S1", "S2", "Ligne"][myPts[cp.ai].k], trendMs });
+    const xAvg = lapAverage(num, hist);
+    rows.push({ num, team: c.team, pos: c.pos, cat: (cls[num] || {}).cat || "", pic: (cls[num] || {}).pic ?? null, gapMs: g0, point: ["S1", "S2", "Ligne"][myPts[cp.ai].k], trendMs, avgMs: xAvg ? xAvg.ms : null, deltaMs: xAvg && myAvg ? xAvg.ms - myAvg.ms : null });
   }
   const ahead = rows.filter((r) => r.gapMs < 0).sort((x, y) => Math.abs(x.gapMs) - Math.abs(y.gapMs)).slice(0, nAhead).reverse();
   const behind = rows.filter((r) => r.gapMs > 0).sort((x, y) => x.gapMs - y.gapMs).slice(0, nBehind);
   if (!ahead.length && !behind.length) return null; // rien de mesurable (voiture à l'arrêt, flux interrompu) : l'écran garde le dernier tableau valide
-  return { ahead, behind, me: cls[myNum] || null, ref: { point: ["S1", "S2", "Ligne"][myPts[a].k], at: myPts[a].t } };
+  return { ahead, behind, me: cls[myNum] || null, myAvg, ref: { point: ["S1", "S2", "Ligne"][myPts[a].k], at: myPts[a].t } };
 }
 
 function duelEstimatesPoints(cars, myNum, remainingMs, store, nowMs, hist = lapStore) {

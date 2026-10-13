@@ -23,7 +23,7 @@ import {
   observeLap,
   mergeBest,
 } from "./lib/drivers";
-import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, classDuels, trackAlertRows, trackSwaps, aroundOnTrack } from "./lib/liveView";
+import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, classDuels, trackAlertRows, trackSwaps, aroundOnTrack, pitOutCars } from "./lib/liveView";
 import {
   Flag,
   Plus,
@@ -849,9 +849,16 @@ function FitLine({ children, max = 16, min = 8, className = "", style }) {
 }
 
 // Contenu du tableau « autour de nous » : les voitures devant et derrière nous SUR LA PISTE, avec l'écart exact mesuré au dernier point commun
-function AroundTable({ data, prio, myPos, now, stale, nA, nB, setNA, setNB }) {
+function AroundTable({ data, prio, myPos, now, stale, nA, nB, setNA, setNB, outs }) {
   const hasCls = !!data && [...data.ahead, ...data.behind].some((r) => r.cat);
-  const cols = { gridTemplateColumns: hasCls ? "2.4rem 3.2rem 4.6rem 2.6rem minmax(0,1fr) 7rem 8.5rem 3.8rem" : "2.4rem 3.2rem minmax(0,1fr) 7rem 8.5rem 3.8rem" };
+  const cols = { gridTemplateColumns: hasCls ? "2.4rem 3.2rem 4.2rem 2.6rem minmax(0,1fr) 6.2rem 7.5rem 4.6rem 8.6rem 3.8rem" : "2.4rem 3.2rem minmax(0,1fr) 6.2rem 7.5rem 4.6rem 8.6rem 3.8rem" };
+  const fmtAvg = (ms) => (ms == null ? "–" : `${Math.floor(ms / 60000)}:${((ms % 60000) / 1000).toFixed(1).padStart(4, "0")}`);
+  const pace = (r, tinted) => {
+    if (r.deltaMs == null) return <span className={tinted ? "" : "text-white/40"}>–</span>;
+    const d = r.deltaMs / 1000;
+    if (Math.abs(d) < 0.05) return <span>= même rythme</span>;
+    return d < 0 ? <span style={tinted ? undefined : { color: "#f87171" }}>{Math.abs(d).toFixed(1)} s/tr plus vite</span> : <span style={tinted ? undefined : { color: "#4ade80" }}>{d.toFixed(1)} s/tr plus lent</span>;
+  };
   const eta = (n) => {
     const d = (prio || []).find((x) => x.num === n);
     return d ? fmtCountdown(d.remainingMs) : "";
@@ -879,6 +886,8 @@ function AroundTable({ data, prio, myPos, now, stale, nA, nB, setNA, setNB }) {
         {fmtGapMs(Math.abs(r.gapMs))} <span className={`font-sans font-normal ${t ? "opacity-70" : "text-white/50"}`}>{r.point}</span>
       </span>
       <span>{trend(r, !!t)}</span>
+      <span className="font-mono tabular-nums text-right">{fmtAvg(r.avgMs)}</span>
+      <span>{pace(r, !!t)}</span>
       <span className="font-mono tabular-nums font-black text-right">{eta(r.num)}</span>
     </div>
     );
@@ -901,6 +910,30 @@ function AroundTable({ data, prio, myPos, now, stale, nA, nB, setNA, setNB }) {
           ⚠ Données figées depuis {stale} s (notre voiture est aux stands ou à l'arrêt, ou le flux est interrompu) : le tableau reprend dès le prochain point.
         </div>
       )}
+      <div className="px-2 pb-1 text-white font-sans text-xs">
+        <span className="font-black uppercase">Notre moyenne</span> : <b className="font-mono">{data.myAvg ? fmtAvg(data.myAvg.ms) : "pas encore calculable"}</b>
+        <span className="text-white/60">{data.myAvg ? ` sur ${data.myAvg.n} tours (hors tours > 5 % plus lents que la moyenne)` : " (il faut au moins 3 tours enregistrés depuis l'ouverture de la page)"}</span>
+      </div>
+      {outs && (
+        <div className="rounded border border-sky-400/70 bg-sky-500/10 px-2 py-1 mb-1 text-white font-sans text-xs">
+          <div className="font-black uppercase text-sky-300">
+            Sortis des stands {outs.list.length ? `(${outs.list.length})` : ""}
+            <span className="text-white/60 normal-case font-normal">
+              {outs.wait > 0 ? ` · liste précédente, mise à jour dans ${outs.wait} s` : " · relevé 15 s après notre passage de la ligne"}
+            </span>
+          </div>
+          {outs.list.length === 0 && <div className="text-white/60">Aucune voiture sortie des stands</div>}
+          {outs.list.map((r) => (
+            <div key={r.num} className="flex flex-wrap gap-x-3 py-0.5 border-t border-white/10">
+              <b>#{r.num}</b>
+              <span className="text-white/70">P{r.pos}{r.cat ? ` · ${r.cat} ${r.pic}e` : ""}</span>
+              <span className="truncate">{r.team}</span>
+              <span className="text-white/70">sortie il y a {Math.max(0, Math.round((outs.at - r.at) / 1000))} s</span>
+              {r.avgMs != null && <span className="font-mono">moy. {fmtAvg(r.avgMs)}</span>}
+            </div>
+          ))}
+        </div>
+      )}
       <div className="flex flex-wrap items-center gap-3 px-2 pb-1 text-white font-sans text-xs">
         {[["Devant", nA, setNA], ["Derrière", nB, setNB]].map(([lbl, v, set]) => (
           <label key={lbl} className="flex items-center gap-1">
@@ -917,7 +950,7 @@ function AroundTable({ data, prio, myPos, now, stale, nA, nB, setNA, setNB }) {
         Écart mesuré au dernier point (S1, S2 ou ligne) franchi par la voiture et par nous. Estimation = compte à rebours avant le dépassement quand il est prévu.
       </div>
       <div className="grid gap-2 px-2 pb-0.5 text-white/50 font-sans font-black uppercase" style={{ ...cols, fontSize: 10 }}>
-        <span>Pos</span><span>N°</span>{hasCls && <span>Classe</span>}{hasCls && <span>PIC</span>}<span>Équipe</span><span className="text-right">Écart</span><span>Tendance</span><span className="text-right">Estim.</span>
+        <span>Pos</span><span>N°</span>{hasCls && <span>Classe</span>}{hasCls && <span>PIC</span>}<span>Équipe</span><span className="text-right">Écart</span><span>Tendance</span><span className="text-right">Moy. 10 t.</span><span>Rythme vs nous</span><span className="text-right">Estim.</span>
       </div>
       {band(`↗ Devant nous (${data.ahead.length})`, "bg-white/10 text-white")}
       {data.ahead.length === 0 && <div className="px-2 py-1 text-white/50 text-xs">Aucune voiture devant sur ce tour</div>}
@@ -953,7 +986,7 @@ function FloatingPanel({ title, onClose, onPopout, children }) {
   };
   const clamp = (p) => ({ x: Math.min(Math.max(0, p.x), Math.max(0, window.innerWidth - 140)), y: Math.min(Math.max(0, p.y), Math.max(0, window.innerHeight - 40)) });
   const snap = (side) => {
-    const w = box.current ? box.current.offsetWidth : 720;
+    const w = box.current ? box.current.offsetWidth : 940;
     const p = clamp({ x: side === "left" ? 8 : window.innerWidth - w - 8, y: pos.y });
     setPos(p);
     save(p);
@@ -975,7 +1008,7 @@ function FloatingPanel({ title, onClose, onPopout, children }) {
     <div
       ref={box}
       className="fixed z-50 flex flex-col rounded-xl border border-white/30 bg-neutral-900/95 shadow-2xl"
-      style={{ left: pos.x, top: pos.y, width: "min(720px, calc(100vw - 16px))", maxHeight: "calc(100vh - 16px)" }}
+      style={{ left: pos.x, top: pos.y, width: "min(940px, calc(100vw - 16px))", maxHeight: "calc(100vh - 16px)" }}
     >
       <div
         className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-white/10 cursor-move select-none touch-none"
@@ -998,7 +1031,7 @@ function FloatingPanel({ title, onClose, onPopout, children }) {
 }
 
 // « Autour de nous » : fenêtre flottante déplaçable, ou fenêtre séparée du navigateur (par exemple sur un autre écran)
-function AroundWindow({ compute, prio, myPos, now, onClose }) {
+function AroundWindow({ compute, getOuts, lapEnd, prio, myPos, now, onClose }) {
   const getN = (k, d) => {
     try {
       const v = Number(localStorage.getItem(k));
@@ -1020,6 +1053,11 @@ function AroundWindow({ compute, prio, myPos, now, onClose }) {
   const setNA = setN("pitboard_around_ahead", setNAraw);
   const setNB = setN("pitboard_around_behind", setNBraw);
   const data = compute(nA, nB);
+  // voitures sorties des stands : relevé figé 15 s après chacun de nos passages de ligne (S3 / S/F)
+  const outSnap = useRef(null);
+  const sinceLine = lapEnd != null ? now - lapEnd : null;
+  if (lapEnd != null && sinceLine >= 15000 && (!outSnap.current || outSnap.current.lapEnd !== lapEnd)) outSnap.current = { lapEnd, at: now, list: getOuts(lapEnd - 30000) };
+  const outs = outSnap.current ? { ...outSnap.current, wait: outSnap.current.lapEnd === lapEnd ? 0 : Math.max(0, Math.ceil((15000 - (sinceLine ?? 0)) / 1000)) } : null;
   const last = useRef(null);
   if (data) last.current = { data, at: now };
   const shown = data || (last.current && last.current.data) || null; // on garde le dernier tableau valide si le calcul est momentanément impossible
@@ -1041,7 +1079,7 @@ function AroundWindow({ compute, prio, myPos, now, onClose }) {
     };
   }, [popup]);
   const openPopup = () => {
-    const w = window.open("", "pitboard_autour", "popup=yes,width=660,height=880,left=40,top=40");
+    const w = window.open("", "pitboard_autour", "popup=yes,width=1000,height=900,left=40,top=40");
     if (!w) {
       setMsg("La fenêtre séparée a été bloquée par le navigateur : autorisez les pop-ups pour ce site, puis réessayez.");
       return;
@@ -1057,7 +1095,7 @@ function AroundWindow({ compute, prio, myPos, now, onClose }) {
     w.document.body.appendChild(root);
     setPopup({ w, root });
   };
-  const table = <AroundTable data={shown} prio={prio} myPos={myPos} now={now} stale={stale} nA={nA} nB={nB} setNA={setNA} setNB={setNB} />;
+  const table = <AroundTable data={shown} prio={prio} myPos={myPos} now={now} stale={stale} nA={nA} nB={nB} setNA={setNA} setNB={setNB} outs={outs} />;
   if (popup) return createPortal(<div className="bg-neutral-900 p-2 min-h-screen">{table}</div>, popup.root);
   return (
     <FloatingPanel title="Autour de nous sur la piste" onClose={onClose} onPopout={openPopup}>
@@ -1318,7 +1356,7 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, part = "all", 
                       </div>
                       {aroundOpen &&
                         createPortal(
-                          <AroundWindow compute={(na, nb) => aroundOnTrack(info.cars, num, now, undefined, undefined, na, nb)} prio={prio} myPos={live.pos} now={now} onClose={() => setAroundOpen(false)} />,
+                          <AroundWindow lapEnd={info.cars[num] ? info.cars[num].lapEnd : null} getOuts={(since) => pitOutCars(info.cars, num, since)} compute={(na, nb) => aroundOnTrack(info.cars, num, now, undefined, undefined, na, nb)} prio={prio} myPos={live.pos} now={now} onClose={() => setAroundOpen(false)} />,
                           document.body
                         )}
                       {genRows.length === 0 && <span className="text-white/60 font-sans px-1" style={{ fontSize: fs(11) }}>Aucun équipage concerné pour le moment</span>}
