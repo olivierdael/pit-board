@@ -136,7 +136,7 @@ export function updatePace(cars, store = paceStore, hist = lapStore, nowMs = Dat
       const h = hist[num] || (hist[num] = []);
       const sOk = c.s1 != null && c.s2 != null && c.s3 != null && Math.abs(c.s1 + c.s2 + c.s3 - c.last) <= 0.03 * c.last;
       h.push({ end: c.lapEnd, lt: c.last, s: sOk ? [c.s1, c.s2, c.s3] : null });
-      if (h.length > 12) h.shift();
+      if (h.length > 500) h.shift();
     }
   }
 }
@@ -782,4 +782,9 @@ export function fcyFromRc(rc, refMs, maxAgeMs = 30 * 60000) {
   });
   if (state === true && refMs && at > 0 && refMs - at > maxAgeMs) return null;
   return state;
+}
+
+// derniers tours enregistrés d'une voiture (depuis l'ouverture de la page, 500 maximum), du plus récent au plus ancien : [{ end (heure de passage), lt (temps du tour), s ([S1,S2,S3] ou null) }]
+export function carLaps(num, hist = lapStore) {
+  return [...(hist[num] || [])].reverse();
 }

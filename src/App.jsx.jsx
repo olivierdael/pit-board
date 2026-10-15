@@ -27,7 +27,7 @@ import {
   lapBests,
   lapsToCsv,
 } from "./lib/drivers";
-import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, fcyFromRc, trackAlertRows, aroundOnTrack, pitOutCars, classPositions } from "./lib/liveView";
+import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, fcyFromRc, trackAlertRows, aroundOnTrack, pitOutCars, carLaps, classPositions } from "./lib/liveView";
 import {
   Flag,
   Plus,
@@ -904,7 +904,8 @@ function AlertPill({ d }) {
 
 // Contenu du tableau « autour de nous sur la piste » : les voitures devant et derrière nous SUR LA PISTE, avec l'écart exact mesuré au dernier point commun
 const fmtAvgMs = (ms) => (ms == null ? "–" : `${Math.floor(ms / 60000)}:${((ms % 60000) / 1000).toFixed(1).padStart(4, "0")}`);
-function AroundTable({ data, prio, alerts, myPos, myNum, myTeam, pilot, now, stale, nA, nB, setNA, setNB }) {
+function AroundTable({ data, prio, alerts, myPos, myNum, myTeam, pilot, now, stale, nA, nB, setNA, setNB, cars }) {
+  const [openNum, setOpenNum] = useState(null); // voiture dont on affiche le détail des tours (clic sur son équipe)
   const hasCls = !!data && [...data.ahead, ...data.behind].some((r) => r.cat);
   const cols = { gridTemplateColumns: hasCls ? "2.6rem 3.2rem 4.2rem 2.6rem minmax(7rem,1fr) 6.2rem 8rem 4.6rem 9rem 11rem" : "2.6rem 3.2rem minmax(7rem,1fr) 6.2rem 8rem 4.6rem 9rem 11rem" };
   const fmtAvg = (ms) => (ms == null ? "–" : `${Math.floor(ms / 60000)}:${((ms % 60000) / 1000).toFixed(1).padStart(4, "0")}`);
@@ -934,12 +935,13 @@ function AroundTable({ data, prio, alerts, myPos, myNum, myTeam, pilot, now, sta
     const cls = t === "green" ? "text-black bg-[#39ff14] font-bold" : t === "red" ? "text-white bg-red-600 font-bold" : "text-white";
     const sub = t === "green" ? "text-black/70" : "text-white/60";
     return (
-      <div key={key + r.num} className={`grid items-center gap-2 px-2 py-0.5 font-sans border-b border-white/10 ${cls}`} style={{ ...cols, fontSize: 13 }}>
+      <React.Fragment key={key + r.num}>
+      <div className={`grid items-center gap-2 px-2 py-0.5 font-sans border-b border-white/10 ${cls}`} style={{ ...cols, fontSize: 13 }}>
         <span className={sub}>P{r.pos}</span>
         <span className="font-black">#{r.num}</span>
         {hasCls && <span className={`truncate ${t ? "" : "text-white/80"}`}>{r.cat}</span>}
         {hasCls && <span className="font-mono tabular-nums font-black">{r.pic != null ? `${r.pic}e` : ""}</span>}
-        <span className="truncate">{r.team}</span>
+        <span className="truncate cursor-pointer underline decoration-dotted underline-offset-2" title="Cliquer pour voir ses tours et ses meilleurs temps (S1, S2, S3)" onClick={() => setOpenNum(openNum === r.num ? null : r.num)}>{r.team}</span>
         <span className="font-mono tabular-nums font-black text-right">
           {fmtGapMs(Math.abs(r.gapMs))} <span className={`font-sans font-normal ${t ? "opacity-70" : "text-white/50"}`}>{r.point}</span>
         </span>
@@ -948,6 +950,8 @@ function AroundTable({ data, prio, alerts, myPos, myNum, myTeam, pilot, now, sta
         <span>{pace(r, !!t)}</span>
         <span className="font-mono tabular-nums font-black text-right">{eta(r.num)}</span>
       </div>
+      {openNum === r.num && cars && cars[r.num] && <CarLapsDetail c={cars[r.num]} num={r.num} />}
+      </React.Fragment>
     );
   };
   const band = (txt, extra) => <div className={`px-2 py-0.5 font-black uppercase tracking-wide text-xs ${extra}`}>{txt}</div>;
@@ -1156,7 +1160,7 @@ function putLS(k, v) {
     /* stockage indisponible */
   }
 }
-function AroundPane({ compute, prio, alerts, myPos, myNum, myTeam, pilot, now }) {
+function AroundPane({ compute, prio, alerts, myPos, myNum, myTeam, pilot, now, cars }) {
   const [nA, setNAraw] = useState(() => Number(getLS("pitboard_around_ahead", 25)) || 25);
   const [nB, setNBraw] = useState(() => Number(getLS("pitboard_around_behind", 15)) || 15);
   const setNA = (v) => { setNAraw(v); putLS("pitboard_around_ahead", v); };
@@ -1166,7 +1170,7 @@ function AroundPane({ compute, prio, alerts, myPos, myNum, myTeam, pilot, now })
   if (data) last.current = { data, at: now };
   const shown = data || (last.current && last.current.data) || null; // on garde le dernier tableau valide si le calcul est momentanément impossible
   const stale = !data && last.current ? Math.round((now - last.current.at) / 1000) : 0;
-  return <AroundTable data={shown} prio={prio} alerts={alerts} myPos={myPos} myNum={myNum} myTeam={myTeam} pilot={pilot} now={now} stale={stale} nA={nA} nB={nB} setNA={setNA} setNB={setNB} />;
+  return <AroundTable data={shown} prio={prio} alerts={alerts} myPos={myPos} myNum={myNum} myTeam={myTeam} pilot={pilot} now={now} stale={stale} nA={nA} nB={nB} setNA={setNA} setNB={setNB} cars={cars} />;
 }
 
 // « Sortis des stands » : voitures apparues en « out » des stands, relevées N secondes après notre passage de la ligne
@@ -1211,6 +1215,58 @@ function OutsPane({ getOuts, lapEnd, now }) {
   );
 }
 
+// détail d'une voiture (clic sur son nom) : meilleurs temps et derniers tours avec S1 S2 S3, les meilleurs en bleu
+function CarLapsDetail({ c, num, cols }) {
+  const BLUE = "#5cc8ff";
+  const laps = carLaps(num);
+  const b = (v, best) => (v != null && best != null && v <= best ? { color: BLUE, fontWeight: 800 } : undefined);
+  const best = (lbl, v) => (
+    <span>
+      {lbl} <b style={{ color: BLUE }}>{v != null ? fmtMs(v) : "–"}</b>
+    </span>
+  );
+  return (
+    <div className="rounded bg-black/60 border border-white/20 px-2 py-1.5 my-0.5 font-sans text-[13px] text-white">
+      <div className="flex flex-wrap gap-x-4 gap-y-0.5 pb-1">
+        <b>#{num} {c.team}</b>
+        {best("Meilleur tour", c.best)}
+        {best("S1", c.s1b)}
+        {best("S2", c.s2b)}
+        {best("S3", c.s3b)}
+      </div>
+      {laps.length === 0 ? (
+        <div className="text-white/60">Aucun tour enregistré depuis l'ouverture de la page (il faut attendre le passage de la voiture).</div>
+      ) : (
+        <div style={{ maxHeight: 260, overflowY: "auto" }}>
+        <table className="font-mono tabular-nums">
+          <thead className="text-white/50" style={{ position: "sticky", top: 0, background: "#0b0f14" }}>
+            <tr>
+              <th className="pr-4 text-left font-normal">Passage</th>
+              <th className="pr-4 text-right font-normal">S1</th>
+              <th className="pr-4 text-right font-normal">S2</th>
+              <th className="pr-4 text-right font-normal">S3</th>
+              <th className="text-right font-normal">Tour</th>
+            </tr>
+          </thead>
+          <tbody>
+            {laps.map((h, i) => (
+              <tr key={h.end + "_" + i}>
+                <td className="pr-4 text-white/70">{new Date(h.end).toLocaleTimeString("fr-BE")}</td>
+                <td className="pr-4 text-right" style={h.s ? b(h.s[0], c.s1b) : undefined}>{h.s ? fmtMs(h.s[0]) : "–"}</td>
+                <td className="pr-4 text-right" style={h.s ? b(h.s[1], c.s2b) : undefined}>{h.s ? fmtMs(h.s[1]) : "–"}</td>
+                <td className="pr-4 text-right" style={h.s ? b(h.s[2], c.s3b) : undefined}>{h.s ? fmtMs(h.s[2]) : "–"}</td>
+                <td className="text-right" style={b(h.lt, c.best)}>{fmtMs(h.lt)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        </div>
+      )}
+      <div className="text-white/50 text-xs pt-1">Bleu = meilleur temps de la voiture (tour ou secteur). Tous les tours réalisés depuis l'ouverture de la page.</div>
+    </div>
+  );
+}
+
 // « Classement » : voisins au classement général ou dans la classe, écarts mesurés à chaque point (S1, S2, ligne), gain/perte sur le dernier tronçon
 const CL_KEY = "pitboard_classement";
 function loadClassement() {
@@ -1225,6 +1281,7 @@ function loadClassement() {
 }
 function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow }) {
   const BLUE = "#5cc8ff";
+  const [openNum, setOpenNum] = useState(null); // voiture dont on affiche le détail des tours (clic sur son nom)
   const tcls = "text-[13px]"; // jamais moins de 12 px
   const me = cars[num];
   const cat = st.mode === "cat";
@@ -1270,10 +1327,12 @@ function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow })
   };
   const line = (r, isAhead, isMe) => {
     const c = isMe ? me : cars[r.num] || {};
+    const id = isMe ? num : r.num;
     return (
-      <div key={r.num} className={`${rowCls} px-1 py-0.5 ${isMe ? "rounded font-black" : "text-white"}`} style={isMe ? { ...cols, color: "#000", backgroundColor: "#ffe600" } : cols}>
+      <React.Fragment key={id}>
+      <div className={`${rowCls} px-1 py-0.5 ${isMe ? "rounded font-black" : "text-white"}`} style={isMe ? { ...cols, color: "#000", backgroundColor: "#ffe600" } : cols}>
         <span>{cat ? (r.pic != null ? `${r.pic}e` : "") : `P${c.pos}`}</span>
-        <span className="truncate font-sans">
+        <span className="truncate font-sans cursor-pointer underline decoration-dotted underline-offset-2" title="Cliquer pour voir ses tours et ses meilleurs temps (S1, S2, S3)" onClick={() => setOpenNum(openNum === id ? null : id)}>
           #{isMe ? num : r.num} {c.team}
           {cat ? ` · P${c.pos}` : ""}
         </span>
@@ -1286,6 +1345,8 @@ function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow })
         <span className="text-right">{isMe ? "" : gainCell(r)}</span>
         <span className="text-right border-l-2 border-white/50 pl-1.5">{isMe ? "" : gainCell(r, "lapGainMs")}</span>
       </div>
+      {openNum === id && <CarLapsDetail c={c} num={id} cols={cols} />}
+      </React.Fragment>
     );
   };
   const chip = (id, label) => (
@@ -1385,6 +1446,7 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, pilot = "", pa
             myTeam={myCarLive ? myCarLive.team : ""}
             pilot={pilot}
             now={now}
+            cars={info.cars}
           />
         </WindowHost>
       )}
