@@ -22,6 +22,10 @@ import {
   relayLapsFromEnds,
   observeLap,
   mergeBest,
+  recordLap,
+  driverLapRows,
+  lapBests,
+  lapsToCsv,
 } from "./lib/drivers";
 import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, trackAlertRows, aroundOnTrack, pitOutCars, classPositions } from "./lib/liveView";
 import {
@@ -517,21 +521,12 @@ function messageRowToApp(r) {
     postedAt: new Date(r.posted_at).getTime(),
   };
 }
+// ravitaillement (litres ajoutés à un arrêt) : une ligne par arrêt, table technical_checks (seule la colonne fuel_l sert)
 function techRowToApp(r) {
   return {
     id: r.id,
     ts: new Date(r.ts).getTime(),
     fuelL: r.fuel_l ?? "",
-    oilOk: r.oil_ok || "",
-    oilAddedL: r.oil_added_l ?? "",
-    coolantOk: r.coolant_ok || "",
-    coolantAddedL: r.coolant_added_l ?? "",
-    tireFL: r.tire_fl ?? "",
-    tireFR: r.tire_fr ?? "",
-    tireRL: r.tire_rl ?? "",
-    tireRR: r.tire_rr ?? "",
-    brakeFront: r.brake_front || "",
-    engineTemp: r.engine_temp ?? "",
   };
 }
 
@@ -709,14 +704,72 @@ function PanelHost({ modal, open, onClose, title, children }) {
   );
 }
 
-// temps de roulage et meilleurs temps de tous les pilotes d'une voiture (menu déroulant côté team manager)
-function DriversTimes({ ds, hasLive }) {
+const BLUE = "#4da3ff"; // meilleurs temps
+
+// télécharge un fichier texte (CSV) depuis le navigateur
+function downloadText(filename, text) {
+  try {
+    const blob = new Blob([text], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const el = document.createElement("a");
+    el.href = url;
+    el.download = filename;
+    document.body.appendChild(el);
+    el.click();
+    el.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+  } catch (e) {}
+}
+
+// tours d'un pilote : S1, S2, S3 et temps total ; les meilleurs en bleu
+function DriverLapsTable({ rows }) {
+  const b = lapBests(rows);
+  const cell = (v, best) => (
+    <td className="px-1.5 py-0.5 text-right" style={v != null && v === best ? { color: BLUE, fontWeight: 800 } : undefined}>
+      {v != null ? fmtMs(v) : "–"}
+    </td>
+  );
+  if (rows.length === 0) return <div className="text-white/40 text-[10px] pl-2 py-1">Aucun tour enregistré pour ce pilote.</div>;
+  return (
+    <div className="max-h-56 overflow-y-auto rounded bg-black/40 mt-1">
+      <table className="w-full font-mono text-[11px] text-white/85">
+        <thead className="sticky top-0 bg-neutral-900 text-white/50">
+          <tr>
+            <th className="px-1.5 py-0.5 text-left">Tour</th>
+            <th className="px-1.5 py-0.5 text-right">S1</th>
+            <th className="px-1.5 py-0.5 text-right">S2</th>
+            <th className="px-1.5 py-0.5 text-right">S3</th>
+            <th className="px-1.5 py-0.5 text-right">Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {[...rows].reverse().map((r) => (
+            <tr key={r.n} className="border-t border-white/10">
+              <td className="px-1.5 py-0.5">{r.n}</td>
+              {cell(r.s1, b.s1)}
+              {cell(r.s2, b.s2)}
+              {cell(r.s3, b.s3)}
+              {cell(r.total, b.total)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// temps de roulage, meilleurs temps et tours (S1 S2 S3, total) de tous les pilotes d'une voiture (menu déroulant côté team manager)
+function DriversTimes({ ds, hasLive, carNum }) {
+  const [openId, setOpenId] = useState(null);
+  const nbLaps = ds.cfg.list.reduce((s, p) => s + (ds.cfg.laps[p.id] || []).length, 0);
   return (
     <div className="text-[10px] text-white/70 flex flex-col gap-1">
       {ds.cfg.list.map((p) => {
         const t = ds.totals[p.id];
         const isCur = ds.curDriver && ds.curDriver.id === p.id;
         const bst = ds.cfg.best[p.id];
+        const rows = driverLapRows(ds.cfg, p.id);
+        const open = openId === p.id;
         return (
           <div key={p.id} className="flex flex-col">
             <div className={`flex items-center justify-between gap-2 font-mono ${isCur ? "text-white font-bold" : ""} ${p.absent ? "opacity-50" : ""}`}>
@@ -732,15 +785,37 @@ function DriversTimes({ ds, hasLive }) {
               </span>
             </div>
             {hasLive && (
-              <div className="font-mono text-[9px] pl-2" style={{ color: "#4da3ff" }}>
+              <div className="font-mono text-[9px] pl-2" style={{ color: BLUE }}>
                 {bst && (bst.lap || bst.s1 || bst.s2 || bst.s3)
                   ? `Meilleur tour ${fmtMs(bst.lap)} · S1 ${fmtMs(bst.s1)} · S2 ${fmtMs(bst.s2)} · S3 ${fmtMs(bst.s3)}`
                   : <span className="text-white/35">Meilleurs temps : pas encore enregistrés</span>}
               </div>
             )}
+            {hasLive && (
+              <div className="pl-2">
+                <button
+                  type="button"
+                  onClick={() => setOpenId(open ? null : p.id)}
+                  className="text-[10px] font-bold text-white/70 hover:text-white underline-offset-2 hover:underline"
+                >
+                  {open ? "▾" : "▸"} Tours S1 · S2 · S3 · total ({rows.length})
+                </button>
+                {open && <DriverLapsTable rows={rows} />}
+              </div>
+            )}
           </div>
         );
       })}
+      {hasLive && (
+        <button
+          type="button"
+          disabled={nbLaps === 0}
+          onClick={() => downloadText(`pitboard_tours_${carNum || "voiture"}.csv`, lapsToCsv(ds.cfg, carNum || "", driverName))}
+          className="self-start mt-1 rounded bg-white/15 hover:bg-white/25 disabled:opacity-40 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-white"
+        >
+          ⬇ Exporter les tours (CSV)
+        </button>
+      )}
     </div>
   );
 }
@@ -1771,7 +1846,7 @@ export default function PitBoard() {
     } catch (e) {
       return {};
     }
-  }); // { [carId]: id de la dernière fiche technique envoyée }
+  }); // { [carId]: id de la dernière saisie de litres envoyée }
   const [calls, setCalls] = useState([]);
   const [messages, setMessages] = useState([]);
   const [flagHistory, setFlagHistory] = useState([{ flag: "vert", ts: Date.now() }]);
@@ -1784,7 +1859,7 @@ export default function PitBoard() {
   useEffect(() => {
     stintsRef.current = stints;
   }, [stints]);
-  // fiche technique par voiture : { [carId]: [ {id, ts, fuelL, oilOk, oilAddedL, coolantOk, coolantAddedL, tireFL, tireFR, tireRL, tireRR, brakeFront} ] }
+  // ravitaillements par voiture : { [carId]: [ {id, ts, fuelL} ] } (litres ajoutés à chaque arrêt)
   const [techChecks, setTechChecks] = useState({});
   const techChecksRef = useRef({});
   useEffect(() => {
@@ -1805,7 +1880,6 @@ export default function PitBoard() {
     yellowSpeedKmh: 60,
     fuelWarnPct: 20,
     fuelCritPct: 10,
-    tireWearLimitMm: 3,
     eventType: "course", // "essais1" | "essais2" | "qualification" | "course"
     idleConsoLh: 3, // consommation au ralenti (L/h) pendant que la voiture est à l'arrêt au stand (0 km/h)
     circuitName: "",
@@ -2028,7 +2102,7 @@ export default function PitBoard() {
       if (!carIds.has(Number(carId))) issues.push(`Relais enregistrés pour une voiture supprimée (id ${carId})`);
     });
     Object.keys(techChecks).forEach((carId) => {
-      if (!carIds.has(Number(carId))) issues.push(`Fiches techniques pour une voiture supprimée (id ${carId})`);
+      if (!carIds.has(Number(carId))) issues.push(`Ravitaillements pour une voiture supprimée (id ${carId})`);
     });
     if (settings.tankCapacityL <= 0) issues.push("Capacité du réservoir invalide (≤ 0 L)");
     if (settings.greenSpeedKmh <= 0) issues.push("Vitesse drapeau vert invalide (≤ 0 km/h)");
@@ -2408,6 +2482,7 @@ export default function PitBoard() {
     // attribuée au pilote du relais en cours (le pilote prévu ou confirmé dans PitBoard).
     // Seul le poste Admin qui relaie le flux les enregistre (une écriture seulement si un record tombe).
     const seenByCar = {};
+    const lapNoByCar = {};
     function recordBests(live) {
       let drivers = settingsRef.current.drivers || {};
       let changed = false;
@@ -2424,11 +2499,26 @@ export default function PitBoard() {
         const first = !seenByCar[car.id];
         const { seen, obs } = observeLap(seenByCar[car.id], lc);
         seenByCar[car.id] = seen;
+        const prevLapNo = lapNoByCar[car.id];
+        lapNoByCar[car.id] = lc.laps;
         if (first || !driverId) return; // premier flux : on mémorise seulement
+        let nc = cfg;
         const cur = cfg.best[driverId];
         const nb = mergeBest(cur, obs);
-        if (nb !== cur) {
-          drivers = { ...drivers, [car.id]: { ...cfg, best: { ...cfg.best, [driverId]: nb } } };
+        if (nb !== cur) nc = { ...nc, best: { ...nc.best, [driverId]: nb } };
+        // tour terminé : on note S1, S2, S3 et le temps total au nom du pilote du relais
+        if (prevLapNo != null && lc.laps != null && lc.laps > prevLapNo && lc.last > 0) {
+          const sOk = lc.s1 != null && lc.s2 != null && lc.s3 != null && Math.abs(lc.s1 + lc.s2 + lc.s3 - lc.last) <= 0.03 * lc.last;
+          nc = recordLap(nc, driverId, {
+            n: lc.laps,
+            total: lc.last,
+            s1: sOk ? lc.s1 : null,
+            s2: sOk ? lc.s2 : null,
+            s3: sOk ? lc.s3 : null,
+          });
+        }
+        if (nc !== cfg) {
+          drivers = { ...drivers, [car.id]: nc };
           changed = true;
         }
       });
@@ -2793,7 +2883,7 @@ export default function PitBoard() {
     setConfirmReset(false);
   }
 
-  // exporte un résumé CSV complet de l'événement (relais, carburant, usures) par voiture
+  // exporte un résumé CSV complet de l'événement (relais, carburant) par voiture
   function exportEventSummary() {
     const csvEscape = (v) => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
     const rows = [
@@ -2809,16 +2899,6 @@ export default function PitBoard() {
         "Temps vert",
         "Temps jaune",
         "Essence ajoutée (L)",
-        "Huile OK",
-        "Huile ajoutée (L)",
-        "Vase expansion OK",
-        "Vase expansion ajouté (L)",
-        "Température moteur (°C)",
-        "Pneu AVG (mm)",
-        "Pneu AVD (mm)",
-        "Pneu ARG (mm)",
-        "Pneu ARD (mm)",
-        "Plaquettes avant (état)",
       ],
     ];
     configuredCars.forEach((car) => {
@@ -2830,7 +2910,7 @@ export default function PitBoard() {
           car.team || "",
           car.pilote || "",
           rankOf(car) || "",
-          "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+          "", "", "", "", "", "", "",
         ]);
         return;
       }
@@ -2850,16 +2930,6 @@ export default function PitBoard() {
           fmtTimeHMS(r.vertSec || 0),
           fmtTimeHMS(r.jauneSec || 0),
           t.fuelL || "",
-          t.oilOk || "",
-          t.oilAddedL || "",
-          t.coolantOk || "",
-          t.coolantAddedL || "",
-          t.engineTemp || "",
-          t.tireFL || "",
-          t.tireFR || "",
-          t.tireRL || "",
-          t.tireRR || "",
-          t.brakeFront || "",
         ]);
       });
     });
@@ -2901,7 +2971,7 @@ export default function PitBoard() {
 
   // --- MOTEUR CARBURANT (estimation) ---
   // calibre la consommation d'une voiture à partir de ses relais terminés (temps vert/jaune)
-  // et de l'essence réellement ajoutée à l'arrêt suivant (fiche technique, même index que le relais)
+  // et de l'essence réellement ajoutée à l'arrêt suivant (litres ajoutés, même index que le relais)
   function computeCarFuelModel(carId) {
     const log = (stints[carId] && stints[carId].log) || [];
     const tech = techChecks[carId] || [];
@@ -3173,7 +3243,7 @@ export default function PitBoard() {
     pushStints({ ...stintsRef.current, [carId]: { ...st, log: newLog } });
   }
 
-  // crée automatiquement une nouvelle fiche technique vierge pour la voiture, dès son entrée au
+  // crée automatiquement une nouvelle ligne de ravitaillement vierge pour la voiture, dès son entrée au
   // stand ; insert direct (l'id réel vient de Supabase, plus d'id temporaire local)
   async function createTechRecord(carId) {
     try {
@@ -3187,16 +3257,6 @@ export default function PitBoard() {
         id: data.id,
         ts: new Date(data.ts).getTime(),
         fuelL: "",
-        oilOk: "",
-        oilAddedL: "",
-        coolantOk: "",
-        coolantAddedL: "",
-        tireFL: "",
-        tireFR: "",
-        tireRL: "",
-        tireRR: "",
-        brakeFront: "",
-        engineTemp: "",
       };
       setTechChecks((prev) => {
         const list = prev[carId] || [];
@@ -3207,28 +3267,14 @@ export default function PitBoard() {
     } catch (e) {}
   }
 
-  // met à jour un seul champ d'une fiche technique : update Supabase ciblé par id
+  // met à jour les litres d'un ravitaillement : update Supabase ciblé par id
   async function updateTechRecord(carId, recordId, patch) {
     setTechChecks((prev) => {
       const list = prev[carId] || [];
       return { ...prev, [carId]: list.map((r) => (r.id === recordId ? { ...r, ...patch } : r)) };
     });
-    const fieldMap = {
-      fuelL: "fuel_l",
-      oilOk: "oil_ok",
-      oilAddedL: "oil_added_l",
-      coolantOk: "coolant_ok",
-      coolantAddedL: "coolant_added_l",
-      tireFL: "tire_fl",
-      tireFR: "tire_fr",
-      tireRL: "tire_rl",
-      tireRR: "tire_rr",
-      brakeFront: "brake_front",
-      engineTemp: "engine_temp",
-    };
-    const numericFields = new Set([
-      "fuelL", "oilAddedL", "coolantAddedL", "tireFL", "tireFR", "tireRL", "tireRR", "engineTemp",
-    ]);
+    const fieldMap = { fuelL: "fuel_l" };
+    const numericFields = new Set(["fuelL"]);
     const dbPatch = {};
     for (const key of Object.keys(patch)) {
       const col = fieldMap[key];
@@ -3294,7 +3340,7 @@ export default function PitBoard() {
     if (myCarIdRef.current != null) setModal(null); // team manager : la fenêtre se ferme après l'envoi
   }
 
-  // fiche technique envoyée : plus de clignotement, la fenêtre se ferme
+  // litres envoyés : plus de clignotement, la fenêtre se ferme
   function ackTech(carId, recordId) {
     setTechAck((prev) => {
       const next = { ...prev, [carId]: recordId };
@@ -3630,8 +3676,8 @@ export default function PitBoard() {
           </p>
           {[
             { id: "admin", label: "Admin", desc: "Accès complet, réglages et réinitialisation" },
-            { id: "manager", label: "Team Manager", desc: "Annonces, contrôle technique, drapeaux" },
-            { id: "pitwall", label: "Pit Wall", desc: "Annonces, contrôle technique, drapeaux" },
+            { id: "manager", label: "Team Manager", desc: "Annonces, litres ajoutés, drapeaux" },
+            { id: "pitwall", label: "Pit Wall", desc: "Annonces, litres ajoutés, drapeaux" },
             { id: "readonly", label: "Read Only", desc: "Consultation uniquement, aucune modification" },
           ].map((r) => (
             <button
@@ -3790,7 +3836,7 @@ export default function PitBoard() {
             <button
               onClick={() => setAdvancedMode((s) => !s)}
               className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide bg-white/15 text-white"
-              title="Affiche/masque le contrôle technique et les messages d'équipe"
+              title="Affiche/masque les messages d'équipe"
             >
               {advancedMode ? "🔧 Mode avancé" : "⚡ Mode simple"}
             </button>
@@ -4360,22 +4406,9 @@ export default function PitBoard() {
                   />
                 </label>
               </div>
-              <label className="flex flex-col gap-1 text-white text-xs">
-                Limite usure pneus (mm)
-                <input
-                  type="number"
-                  min="0"
-                  step="0.1"
-                  value={settings.tireWearLimitMm}
-                  onChange={(e) =>
-                    pushSettings({ ...settings, tireWearLimitMm: Math.max(0, Number(e.target.value) || 0) })
-                  }
-                  className="px-2 py-1.5 text-sm rounded bg-black/50 text-white border border-white/20 focus:outline-none focus:border-white"
-                />
-              </label>
             </div>
             <p className="text-white/50 text-[10px] mt-2">
-              Ex : 3 pompes pour 6 voitures — une fois les 3 pompes annoncées, une nouvelle annonce fuel n'est acceptée que si son temps estimé dépasse le chrono le plus bas des annonces fuel en cours, augmenté de ce délai. Si "Oui" est sélectionné ci-dessus, cette limite est totalement désactivée tant que le drapeau jaune est actif. Au-delà de la limite d'usure pneus, ou à l'état "Critique" pour les plaquettes, la valeur s'affiche en rouge dans l'encart.
+              Ex : 3 pompes pour 6 voitures — une fois les 3 pompes annoncées, une nouvelle annonce fuel n'est acceptée que si son temps estimé dépasse le chrono le plus bas des annonces fuel en cours, augmenté de ce délai. Si "Oui" est sélectionné ci-dessus, cette limite est totalement désactivée tant que le drapeau jaune est actif.
             </p>
 
             <div className="mt-4 pt-3 border-t border-white/20 flex items-center gap-2 flex-wrap">
@@ -4397,7 +4430,7 @@ export default function PitBoard() {
               ) : (
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-white text-xs font-bold">
-                    Confirmer ? Toutes les annonces, messages, relais, fiches techniques et
+                    Confirmer ? Toutes les annonces, messages, relais, ravitaillements et
                     l'heure de l'événement seront effacés (les voitures configurées et les
                     réglages sont conservés).
                   </span>
@@ -4596,7 +4629,7 @@ export default function PitBoard() {
                     const recsT = techChecks[car.id] || [];
                     const lastRecT = recsT[recsT.length - 1];
                     const stT = stints[car.id];
-                    // contrôle technique à compléter : la voiture a quitté les stands et la fiche n'est pas encore "envoyée"
+                    // litres ajoutés à saisir : la voiture a quitté les stands et la saisie n'est pas encore "envoyée"
                     const techPending = !!(myCar && lastRecT && stT && stT.lastExitAt && stT.lastExitAt > lastRecT.ts && techAck[car.id] !== lastRecT.id);
                     return (
                       <div
@@ -4719,7 +4752,7 @@ export default function PitBoard() {
                                 className="rounded-lg px-2 py-2 text-[11px] font-black uppercase tracking-wide bg-white/15 text-white hover:bg-white/25"
                                 style={techPending ? { animation: "pbblink 0.9s infinite" } : undefined}
                               >
-                                🔧 Contrôle technique{techPending ? " !" : ""}
+                                ⛽ Litres ajoutés{techPending ? " !" : ""}
                               </button>
                             </div>
                           )}
@@ -4771,9 +4804,9 @@ export default function PitBoard() {
                                 onClick={() => setDriversOpen((o) => !o)}
                                 className="flex items-center justify-between rounded bg-white/10 hover:bg-white/15 px-2 py-1 text-left text-[10px] font-black uppercase tracking-wide text-white/80"
                               >
-                                <span>{driversOpen ? "▾" : "▸"} Pilotes : temps de roulage et meilleurs temps ({ds.cfg.list.length})</span>
+                                <span>{driversOpen ? "▾" : "▸"} Pilotes : temps de roulage, tours S1 S2 S3 et meilleurs temps ({ds.cfg.list.length})</span>
                               </button>
-                              {driversOpen && <DriversTimes ds={ds} hasLive={!!liveFor(car)} />}
+                              {driversOpen && <DriversTimes ds={ds} hasLive={!!liveFor(car)} carNum={car.numero} />}
                             </div>
                           )}
 
@@ -4806,7 +4839,7 @@ export default function PitBoard() {
                                   <div className="text-white/50 uppercase tracking-widest font-bold text-[9px]">
                                     Temps de roulage par pilote
                                   </div>
-                                  <DriversTimes ds={ds} hasLive={!!liveFor(car)} />
+                                  <DriversTimes ds={ds} hasLive={!!liveFor(car)} carNum={car.numero} />
                                 </div>
                               )}
                               {/* CLASSEMENT GÉNÉRAL : éditable directement dans l'encart */}
@@ -4853,8 +4886,8 @@ export default function PitBoard() {
                                       if (!fuel.calibrated) {
                                         return (
                                           <div className="text-white/40 italic">
-                                            ⛽ Calibration insuffisante (ravitaillement à enregistrer via le
-                                            Contrôle technique)
+                                            ⛽ Calibration insuffisante (saisissez les litres ajoutés au
+                                            prochain arrêt)
                                           </div>
                                         );
                                       }
@@ -4949,84 +4982,12 @@ export default function PitBoard() {
                                 );
                               })()}
 
-                              {/* DERNIER CONTRÔLE TECHNIQUE : pour préparer le relais suivant */}
+                              {/* DERNIER RAVITAILLEMENT */}
                               {(() => {
                                 const records = techChecks[car.id] || [];
                                 const last = records[records.length - 1];
-                                if (!last) return null;
-                                const hasAny =
-                                  last.fuelL || last.oilOk || last.coolantOk ||
-                                  last.tireFL || last.tireFR || last.tireRL || last.tireRR ||
-                                  last.brakeFront || last.engineTemp;
-                                if (!hasAny) return null;
-                                const tireOver = (v) => v !== "" && v != null && Number(v) <= settings.tireWearLimitMm;
-                                const tireStyle = (v) => (tireOver(v) ? { color: "#ff3b3b", fontWeight: "bold" } : {});
-                                return (
-                                  <div className="text-[10px] text-white/70 flex flex-col gap-1 bg-white/5 rounded px-2 py-1.5">
-                                    <div className="text-white/50 uppercase tracking-widest font-bold text-[9px]">
-                                      Dernier contrôle technique
-                                    </div>
-                                    <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">
-                                      {last.fuelL && <div>⛽ {last.fuelL} L</div>}
-                                      {last.oilOk && (
-                                        <div>
-                                          🛢️ {last.oilOk === "ok" ? "OK" : `Non OK (+${last.oilAddedL || "?"}L)`}
-                                        </div>
-                                      )}
-                                      {last.coolantOk && (
-                                        <div>
-                                          💧 {last.coolantOk === "ok" ? "OK" : `Non OK (+${last.coolantAddedL || "?"}L)`}
-                                        </div>
-                                      )}
-                                      {last.engineTemp && <div>🌡️ {last.engineTemp} °C</div>}
-                                      {last.brakeFront && (
-                                        <div
-                                          style={
-                                            last.brakeFront === "critique"
-                                              ? { color: "#ff3b3b", fontWeight: "bold" }
-                                              : last.brakeFront === "moyen"
-                                              ? { color: "#ffd400", fontWeight: "bold" }
-                                              : {}
-                                          }
-                                        >
-                                          🛑{" "}
-                                          {last.brakeFront === "bon"
-                                            ? "Bon"
-                                            : last.brakeFront === "moyen"
-                                            ? "Moyen"
-                                            : last.brakeFront === "critique"
-                                            ? "Critique"
-                                            : last.brakeFront}
-                                        </div>
-                                      )}
-                                    </div>
-                                    {(last.tireFL || last.tireFR || last.tireRL || last.tireRR) && (
-                                      <div>
-                                        <div className="text-white/50 text-[9px] uppercase tracking-wide mb-0.5">
-                                          🛞 Usure pneus (mm)
-                                        </div>
-                                        <div className="grid grid-cols-2 gap-x-3 gap-y-0.5">
-                                          <div className="flex justify-between gap-2">
-                                            <span className="text-white/50">AVG</span>
-                                            <span className="text-white font-semibold" style={tireStyle(last.tireFL)}>{last.tireFL || "?"}</span>
-                                          </div>
-                                          <div className="flex justify-between gap-2">
-                                            <span className="text-white/50">AVD</span>
-                                            <span className="text-white font-semibold" style={tireStyle(last.tireFR)}>{last.tireFR || "?"}</span>
-                                          </div>
-                                          <div className="flex justify-between gap-2">
-                                            <span className="text-white/50">ARG</span>
-                                            <span className="text-white font-semibold" style={tireStyle(last.tireRL)}>{last.tireRL || "?"}</span>
-                                          </div>
-                                          <div className="flex justify-between gap-2">
-                                            <span className="text-white/50">ARD</span>
-                                            <span className="text-white font-semibold" style={tireStyle(last.tireRR)}>{last.tireRR || "?"}</span>
-                                          </div>
-                                        </div>
-                                      </div>
-                                    )}
-                                  </div>
-                                );
+                                if (!last || !last.fuelL) return null;
+                                return <div className="text-[10px] text-white/70 bg-white/5 rounded px-2 py-1">⛽ Dernier ajout : {last.fuelL} L</div>;
                               })()}
                               {call ? (
                                 myCar ? null : callControls
@@ -5116,7 +5077,7 @@ export default function PitBoard() {
                           </>
                         ) : (
                           <span className="text-white/70 text-sm font-semibold">
-                            {onTrackM ? "Calibration insuffisante : enregistrez un ravitaillement (contrôle technique)." : "Voiture au stand : la jauge repart à la sortie."}
+                            {onTrackM ? "Calibration insuffisante : saisissez les litres ajoutés à l'arrêt." : "Voiture au stand : la jauge repart à la sortie."}
                           </span>
                         )}
                       </div>
@@ -5359,18 +5320,14 @@ export default function PitBoard() {
 
         {(advancedMode || !!myCar) && (
         <>
-        {/* CONTRÔLE TECHNIQUE (fenêtre fixe, reste modifiable même après le départ de la voiture) */}
-        <PanelHost modal={!!myCar} open={modal === "tech"} onClose={() => setModal(null)} title="Contrôle technique">
+        {/* LITRES AJOUTÉS (fenêtre fixe, reste modifiable même après le départ de la voiture) : sert à calculer la consommation moyenne */}
+        <PanelHost modal={!!myCar} open={modal === "tech"} onClose={() => setModal(null)} title="Litres ajoutés">
         <div className="rounded-lg border-2 border-black/30 mb-4 p-3 bg-black/40">
-          <h2 className="text-white font-bold tracking-wide uppercase text-xs mb-2 flex items-center gap-2">
-            <Settings2 size={14} /> Contrôle technique
-          </h2>
           {(() => {
             if (configuredCars.length === 0) {
               return (
                 <p className="text-white/60 text-sm">
-                  Encodez au moins une voiture dans la configuration pour utiliser le contrôle
-                  technique.
+                  Encodez au moins une voiture dans la configuration pour saisir les litres ajoutés.
                 </p>
               );
             }
@@ -5397,7 +5354,7 @@ export default function PitBoard() {
                 {!record ? (
                   <div className="flex flex-col gap-2">
                     <p className="text-white/60 text-xs">
-                      Aucune fiche pour cette voiture. Une fiche se crée automatiquement à chaque
+                      Aucune saisie pour cette voiture. Une ligne se crée automatiquement à chaque
                       "Entrée" au stand, ou créez-en une manuellement :
                     </p>
                     <button
@@ -5405,209 +5362,28 @@ export default function PitBoard() {
                       onClick={() => createTechRecord(car.id)}
                       className="self-start px-3 py-1.5 rounded font-black uppercase tracking-wide text-xs bg-black text-white"
                     >
-                      + Nouvelle fiche
+                      + Nouvel arrêt
                     </button>
                   </div>
                 ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    {/* SECTION FLUIDES */}
-                    <div className="bg-white/5 rounded-md p-2.5 flex flex-col gap-2 md:col-span-2">
-                      <div className="text-white/50 text-[10px] uppercase tracking-widest font-bold">
-                        Fluides
-                      </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                        <label className="flex flex-col gap-1 text-white text-xs">
-                          ⛽ Essence ajoutée (litres)
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.1"
-                            value={record.fuelL}
-                            onChange={(e) => updateTechRecord(car.id, record.id, { fuelL: e.target.value })}
-                            className="px-2 py-1.5 text-sm rounded bg-black/50 text-white border border-white/20 focus:outline-none focus:border-white"
-                          />
-                        </label>
-
-                        <div className="flex flex-col gap-1 text-white text-xs">
-                          🛢️ Niveau d'huile
-                          <div className="flex items-center gap-3">
-                            <label className="flex items-center gap-1.5 cursor-pointer">
-                              <input
-                                type="radio"
-                                name={`oil-${car.id}-${record.id}`}
-                                checked={record.oilOk === "ok"}
-                                onChange={() => updateTechRecord(car.id, record.id, { oilOk: "ok", oilAddedL: "" })}
-                              />
-                              OK
-                            </label>
-                            <label className="flex items-center gap-1.5 cursor-pointer">
-                              <input
-                                type="radio"
-                                name={`oil-${car.id}-${record.id}`}
-                                checked={record.oilOk === "non"}
-                                onChange={() => updateTechRecord(car.id, record.id, { oilOk: "non" })}
-                              />
-                              Non OK
-                            </label>
-                          </div>
-                          {record.oilOk === "non" && (
-                            <input
-                              type="number"
-                              min="0"
-                              step="0.1"
-                              placeholder="Litres ajoutés"
-                              value={record.oilAddedL}
-                              onChange={(e) => updateTechRecord(car.id, record.id, { oilAddedL: e.target.value })}
-                              className="px-2 py-1.5 text-sm rounded bg-black/50 text-white placeholder-white/40 border border-white/20 focus:outline-none focus:border-white"
-                            />
-                          )}
-                        </div>
-
-                        <div className="flex flex-col gap-1 text-white text-xs">
-                          💧 Vase d'expansion
-                          <div className="flex items-center gap-3">
-                            <label className="flex items-center gap-1.5 cursor-pointer">
-                              <input
-                                type="radio"
-                                name={`coolant-${car.id}-${record.id}`}
-                                checked={record.coolantOk === "ok"}
-                                onChange={() =>
-                                  updateTechRecord(car.id, record.id, { coolantOk: "ok", coolantAddedL: "" })
-                                }
-                              />
-                              OK
-                            </label>
-                            <label className="flex items-center gap-1.5 cursor-pointer">
-                              <input
-                                type="radio"
-                                name={`coolant-${car.id}-${record.id}`}
-                                checked={record.coolantOk === "non"}
-                                onChange={() => updateTechRecord(car.id, record.id, { coolantOk: "non" })}
-                              />
-                              Non OK
-                            </label>
-                          </div>
-                          {record.coolantOk === "non" && (
-                            <input
-                              type="number"
-                              min="0"
-                              step="0.1"
-                              placeholder="Litres ajoutés"
-                              value={record.coolantAddedL}
-                              onChange={(e) =>
-                                updateTechRecord(car.id, record.id, { coolantAddedL: e.target.value })
-                              }
-                              className="px-2 py-1.5 text-sm rounded bg-black/50 text-white placeholder-white/40 border border-white/20 focus:outline-none focus:border-white"
-                            />
-                          )}
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* SECTION FREINS & MOTEUR */}
-                    <div className="bg-white/5 rounded-md p-2.5 flex flex-col gap-2">
-                      <div className="text-white/50 text-[10px] uppercase tracking-widest font-bold">
-                        Freins & moteur
-                      </div>
-                      <div className="grid grid-cols-2 gap-3">
-                        <label className="flex flex-col gap-1 text-white text-xs">
-                          🛑 Plaquettes avant (état)
-                          <select
-                            value={record.brakeFront}
-                            onChange={(e) =>
-                              updateTechRecord(car.id, record.id, { brakeFront: e.target.value })
-                            }
-                            className="px-2 py-1.5 text-sm rounded bg-black/50 text-white border border-white/20 focus:outline-none focus:border-white"
-                          >
-                            <option value="">—</option>
-                            <option value="bon">Bon</option>
-                            <option value="moyen">Moyen</option>
-                            <option value="critique">Critique</option>
-                          </select>
-                        </label>
-
-                        <label className="flex flex-col gap-1 text-white text-xs">
-                          🌡️ Température moteur (°C)
-                          <input
-                            type="number"
-                            min="0"
-                            step="1"
-                            value={record.engineTemp}
-                            onChange={(e) =>
-                              updateTechRecord(car.id, record.id, { engineTemp: e.target.value })
-                            }
-                            className="px-2 py-1.5 text-sm rounded bg-black/50 text-white border border-white/20 focus:outline-none focus:border-white"
-                          />
-                        </label>
-                      </div>
-                    </div>
-
-                    {/* SECTION PNEUS */}
-                    <div className="bg-white/5 rounded-md p-2.5 flex flex-col gap-2">
-                      <div className="text-white/50 text-[10px] uppercase tracking-widest font-bold">
-                        🛞 Usure des pneus (mm)
-                      </div>
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                        <label className="flex flex-col gap-1 text-white text-xs">
-                          Avant gauche
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.1"
-                            value={record.tireFL}
-                            onChange={(e) =>
-                              updateTechRecord(car.id, record.id, { tireFL: e.target.value })
-                            }
-                            className="px-2 py-1.5 text-sm rounded bg-black/50 text-white border border-white/20 focus:outline-none focus:border-white"
-                          />
-                        </label>
-                        <label className="flex flex-col gap-1 text-white text-xs">
-                          Avant droit
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.1"
-                            value={record.tireFR}
-                            onChange={(e) =>
-                              updateTechRecord(car.id, record.id, { tireFR: e.target.value })
-                            }
-                            className="px-2 py-1.5 text-sm rounded bg-black/50 text-white border border-white/20 focus:outline-none focus:border-white"
-                          />
-                        </label>
-                        <label className="flex flex-col gap-1 text-white text-xs">
-                          Arrière gauche
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.1"
-                            value={record.tireRL}
-                            onChange={(e) =>
-                              updateTechRecord(car.id, record.id, { tireRL: e.target.value })
-                            }
-                            className="px-2 py-1.5 text-sm rounded bg-black/50 text-white border border-white/20 focus:outline-none focus:border-white"
-                          />
-                        </label>
-                        <label className="flex flex-col gap-1 text-white text-xs">
-                          Arrière droit
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.1"
-                            value={record.tireRR}
-                            onChange={(e) =>
-                              updateTechRecord(car.id, record.id, { tireRR: e.target.value })
-                            }
-                            className="px-2 py-1.5 text-sm rounded bg-black/50 text-white border border-white/20 focus:outline-none focus:border-white"
-                          />
-                        </label>
-                      </div>
-                    </div>
-                  </div>
+                  <label className="flex flex-col gap-1 text-white text-sm max-w-xs">
+                    ⛽ Essence ajoutée à cet arrêt (litres)
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      min="0"
+                      step="0.1"
+                      autoFocus
+                      value={record.fuelL}
+                      onChange={(e) => updateTechRecord(car.id, record.id, { fuelL: e.target.value })}
+                      className="px-3 py-2 text-lg rounded bg-black/50 text-white border border-white/20 focus:outline-none focus:border-white"
+                    />
+                  </label>
                 )}
 
                 {records.length > 1 && (
                   <p className="text-white/40 text-[10px]">
-                    {records.length} fiches enregistrées pour cette voiture depuis le début de l'événement.
+                    {records.length} arrêts enregistrés pour cette voiture depuis le début de l'événement.
                   </p>
                 )}
                 {myCar && (
