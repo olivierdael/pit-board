@@ -797,7 +797,7 @@ function DraftInput({ value, onCommit, placeholder, className, disabled }) {
 
 // Essais : encart "consommation". Le réservoir est plein au départ ; à la fin on remet du carburant et on saisit les litres :
 // consommation = litres / distance parcourue (temps de roulage vert et jaune, vitesses moyennes des réglages).
-function EssaisConsoCard({ run, tankL, lapsKm, savedValue, onSave }) {
+function EssaisConsoCard({ run, tankL, lapsKm, savedValue, onSave, running, canCancel, onStart, onCancel }) {
   const [added, setAdded] = useState("");
   const [saved, setSaved] = useState(false);
   const litres = parseFloat(String(added).replace(",", "."));
@@ -808,6 +808,17 @@ function EssaisConsoCard({ run, tankL, lapsKm, savedValue, onSave }) {
     <div className="rounded-xl bg-black/80 border-2 border-[#ffd400] px-3 py-1.5 flex flex-col gap-1">
       <div className="flex items-center gap-3 flex-wrap text-white">
         <span className="text-sm font-black uppercase tracking-wide whitespace-nowrap">⛽ Essais · plein de {tankL} L au départ</span>
+        {!running ? (
+          <button type="button" onClick={onStart} className="px-3 py-1 rounded font-black uppercase text-xs bg-green-500 text-black hover:bg-green-400">
+            🏁 Voiture sur la piste : lancer le calcul
+          </button>
+        ) : (
+          canCancel && (
+            <button type="button" onClick={onCancel} className="px-2 py-0.5 rounded font-bold text-[11px] bg-white/15 text-white hover:bg-white/25" title="Annuler si le lancement était une erreur">
+              ↺ Pas encore partie
+            </button>
+          )
+        )}
         <span className="font-mono text-sm font-bold whitespace-nowrap">
           Roulage {fmtTimeHMS(run.vertSec + run.jauneSec)} 🟢{fmtTimeHMS(run.vertSec)} 🟡{fmtTimeHMS(run.jauneSec)}
         </span>
@@ -892,7 +903,8 @@ function AlertPill({ d }) {
 }
 
 // Contenu du tableau « autour de nous sur la piste » : les voitures devant et derrière nous SUR LA PISTE, avec l'écart exact mesuré au dernier point commun
-function AroundTable({ data, prio, alerts, myPos, myNum, myTeam, pilot, now, stale, nA, nB, setNA, setNB, outs, outDelay, setOutDelay }) {
+const fmtAvgMs = (ms) => (ms == null ? "–" : `${Math.floor(ms / 60000)}:${((ms % 60000) / 1000).toFixed(1).padStart(4, "0")}`);
+function AroundTable({ data, prio, alerts, myPos, myNum, myTeam, pilot, now, stale, nA, nB, setNA, setNB }) {
   const hasCls = !!data && [...data.ahead, ...data.behind].some((r) => r.cat);
   const cols = { gridTemplateColumns: hasCls ? "2.6rem 3.2rem 4.2rem 2.6rem minmax(7rem,1fr) 6.2rem 8rem 4.6rem 9rem 11rem" : "2.6rem 3.2rem minmax(7rem,1fr) 6.2rem 8rem 4.6rem 9rem 11rem" };
   const fmtAvg = (ms) => (ms == null ? "–" : `${Math.floor(ms / 60000)}:${((ms % 60000) / 1000).toFixed(1).padStart(4, "0")}`);
@@ -945,9 +957,6 @@ function AroundTable({ data, prio, alerts, myPos, myNum, myTeam, pilot, now, sta
   const hidden = (alerts || []).filter((d) => !shownNums.has(d.num));
   const ref = data.ref;
   const refAge = ref ? Math.max(0, Math.round((now - ref.at) / 1000)) : null;
-  const delayInput = (
-    <input type="number" min={0} max={120} value={outDelay} onChange={(e) => setOutDelay(Math.max(0, Math.min(120, Number(e.target.value) || 0)))} className="w-14 rounded bg-black/60 border border-white/30 px-1 py-0.5 text-white" />
-  );
   return (
     <div>
       {hidden.length > 0 && (
@@ -977,31 +986,6 @@ function AroundTable({ data, prio, alerts, myPos, myNum, myTeam, pilot, now, sta
         <span className="font-black uppercase">Notre moyenne</span> : <b className="font-mono">{data.myAvg ? fmtAvg(data.myAvg.ms) : "pas encore calculable"}</b>
         <span className="text-white/60">{data.myAvg ? ` sur ${data.myAvg.n} tours (hors tours > 5 % plus lents que la moyenne)` : " (il faut au moins 3 tours enregistrés depuis l'ouverture de la page)"}</span>
       </div>
-      {outs ? (
-        <div className="rounded border border-sky-400/70 bg-sky-500/10 px-2 py-1 mb-1 text-white font-sans text-xs">
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-            <span className="font-black uppercase text-sky-300">Sortis des stands {outs.list.length ? `(${outs.list.length})` : ""}</span>
-            <label className="flex items-center gap-1 text-white/80">
-              relevé {delayInput} s après notre passage de la ligne
-            </label>
-            {outs.wait > 0 && <span className="text-white/60">liste précédente, mise à jour dans {outs.wait} s</span>}
-          </div>
-          {outs.list.length === 0 && <div className="text-white/60">Aucune voiture sortie des stands</div>}
-          {outs.list.map((r) => (
-            <div key={r.num} className="flex flex-wrap gap-x-3 py-0.5 border-t border-white/10">
-              <b>#{r.num}</b>
-              <span className="text-white/70">P{r.pos}{r.cat ? ` · ${r.cat} ${r.pic}e` : ""}</span>
-              <span className="truncate">{r.team}</span>
-              <span className="text-white/70">sortie il y a {Math.max(0, Math.round((outs.at - r.at) / 1000))} s</span>
-              {r.avgMs != null && <span className="font-mono">moy. {fmtAvg(r.avgMs)}</span>}
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className="rounded border border-sky-400/40 px-2 py-1 mb-1 text-white/70 font-sans text-xs flex items-center gap-2">
-          Sortis des stands : relevé {delayInput} s après notre passage de la ligne
-        </div>
-      )}
       <div className="flex flex-wrap items-center gap-3 px-2 pb-1 text-white font-sans text-xs">
         {[["Devant", nA, setNA], ["Derrière", nB, setNB]].map(([lbl, v, set]) => (
           <label key={lbl} className="flex items-center gap-1">
@@ -1043,8 +1027,10 @@ function AroundTable({ data, prio, alerts, myPos, myNum, myTeam, pilot, now, sta
 }
 
 // Fenêtre flottante, déplaçable à la souris (barre de titre) ou avec ◀ ▶ : le reste de l'écran reste visible et utilisable derrière
-function FloatingPanel({ title, onClose, onPopout, wide, children }) {
-  const KEY = "pitboard_around_pos";
+let Z_TOP = 50;
+function FloatingPanel({ title, onClose, onPopout, wide, storeKey = "around", startPos, children }) {
+  const KEY = "pitboard_win_" + storeKey;
+  const [z, setZ] = useState(() => ++Z_TOP);
   const box = useRef(null);
   const drag = useRef(null);
   const [pos, setPos] = useState(() => {
@@ -1054,7 +1040,7 @@ function FloatingPanel({ title, onClose, onPopout, wide, children }) {
     } catch {
       /* stockage indisponible */
     }
-    return { x: 16, y: 72 };
+    return startPos || { x: 16, y: 72 };
   });
   const save = (p) => {
     try {
@@ -1086,8 +1072,9 @@ function FloatingPanel({ title, onClose, onPopout, wide, children }) {
   return (
     <div
       ref={box}
-      className="fixed z-50 flex flex-col rounded-xl border border-white/30 bg-neutral-900/95 shadow-2xl"
-      style={{ left: pos.x, top: pos.y, width: wide ? "min(1700px, calc(100vw - 16px))" : "min(1000px, calc(100vw - 16px))", maxHeight: "calc(100vh - 16px)", minWidth: wide ? 700 : 420, resize: "both", overflow: "hidden" }}
+      className="fixed flex flex-col rounded-xl border border-white/30 bg-neutral-900/95 shadow-2xl"
+      onPointerDownCapture={() => setZ(++Z_TOP)}
+      style={{ zIndex: z, left: pos.x, top: pos.y, width: wide ? "min(1700px, calc(100vw - 100px))" : "min(1000px, calc(100vw - 150px))", maxHeight: "calc(100vh - 16px)", minWidth: wide ? 700 : 420, resize: "both", overflow: "hidden" }}
     >
       <div
         className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-white/10 cursor-move select-none touch-none"
@@ -1110,7 +1097,7 @@ function FloatingPanel({ title, onClose, onPopout, wide, children }) {
 }
 
 // Fenêtre flottante déplaçable, ou fenêtre séparée du navigateur (par exemple sur un autre écran) : contenu fourni par l'appelant
-function WindowHost({ title, onClose, wide, children }) {
+function WindowHost({ title, onClose, wide, storeKey, startPos, children }) {
   const [popup, setPopup] = useState(null); // { w, root } quand la fenêtre séparée est ouverte
   const [msg, setMsg] = useState("");
   useEffect(() => {
@@ -1146,7 +1133,7 @@ function WindowHost({ title, onClose, wide, children }) {
   };
   if (popup) return createPortal(<div className="bg-neutral-900 p-2 min-h-screen">{children}</div>, popup.root);
   return (
-    <FloatingPanel title={title} onClose={onClose} onPopout={openPopup} wide={wide}>
+    <FloatingPanel title={title} onClose={onClose} onPopout={openPopup} wide={wide} storeKey={storeKey} startPos={startPos}>
       {msg && <div className="rounded bg-red-500/20 border border-red-400/60 px-2 py-1 mb-1 text-red-200 font-sans text-xs">{msg}</div>}
       {children}
     </FloatingPanel>
@@ -1154,59 +1141,73 @@ function WindowHost({ title, onClose, wide, children }) {
 }
 
 // « Autour de nous sur la piste » : les voitures devant et derrière nous sur la piste (contenu, sans fenêtre)
-function AroundPane({ compute, getOuts, lapEnd, prio, alerts, myPos, myNum, myTeam, pilot, now }) {
-  const getS = (k, d) => {
-    try {
-      const v = localStorage.getItem(k);
-      return v == null ? d : v;
-    } catch {
-      return d;
-    }
-  };
-  const putS = (k, v) => {
-    try {
-      localStorage.setItem(k, String(v));
-    } catch {
-      /* stockage indisponible */
-    }
-  };
-  const [nA, setNAraw] = useState(() => Number(getS("pitboard_around_ahead", 25)) || 25);
-  const [nB, setNBraw] = useState(() => Number(getS("pitboard_around_behind", 15)) || 15);
-  const [outDelay, setOutDelayRaw] = useState(() => {
-    const v = Number(getS("pitboard_around_outdelay", 15));
-    return Number.isFinite(v) && v >= 0 ? v : 15;
-  });
-  const setNA = (v) => { setNAraw(v); putS("pitboard_around_ahead", v); };
-  const setNB = (v) => { setNBraw(v); putS("pitboard_around_behind", v); };
-  const setOutDelay = (v) => { setOutDelayRaw(v); putS("pitboard_around_outdelay", v); };
+function getLS(k, d) {
+  try {
+    const v = localStorage.getItem(k);
+    return v == null ? d : v;
+  } catch {
+    return d;
+  }
+}
+function putLS(k, v) {
+  try {
+    localStorage.setItem(k, String(v));
+  } catch {
+    /* stockage indisponible */
+  }
+}
+function AroundPane({ compute, prio, alerts, myPos, myNum, myTeam, pilot, now }) {
+  const [nA, setNAraw] = useState(() => Number(getLS("pitboard_around_ahead", 25)) || 25);
+  const [nB, setNBraw] = useState(() => Number(getLS("pitboard_around_behind", 15)) || 15);
+  const setNA = (v) => { setNAraw(v); putLS("pitboard_around_ahead", v); };
+  const setNB = (v) => { setNBraw(v); putLS("pitboard_around_behind", v); };
   const data = compute(nA, nB);
-  // voitures sorties des stands : relevé figé N secondes après chacun de nos passages de ligne (S3 / S/F)
-  const outSnap = useRef(null);
-  const sinceLine = lapEnd != null ? now - lapEnd : null;
-  if (lapEnd != null && sinceLine >= outDelay * 1000 && (!outSnap.current || outSnap.current.lapEnd !== lapEnd || outSnap.current.delay !== outDelay)) outSnap.current = { lapEnd, delay: outDelay, at: now, list: getOuts(lapEnd - 30000) };
-  const outs = outSnap.current ? { ...outSnap.current, wait: outSnap.current.lapEnd === lapEnd ? 0 : Math.max(0, Math.ceil((outDelay * 1000 - (sinceLine ?? 0)) / 1000)) } : null;
   const last = useRef(null);
   if (data) last.current = { data, at: now };
   const shown = data || (last.current && last.current.data) || null; // on garde le dernier tableau valide si le calcul est momentanément impossible
   const stale = !data && last.current ? Math.round((now - last.current.at) / 1000) : 0;
-  return <AroundTable data={shown} prio={prio} alerts={alerts} myPos={myPos} myNum={myNum} myTeam={myTeam} pilot={pilot} now={now} stale={stale} nA={nA} nB={nB} setNA={setNA} setNB={setNB} outs={outs} outDelay={outDelay} setOutDelay={setOutDelay} />;
+  return <AroundTable data={shown} prio={prio} alerts={alerts} myPos={myPos} myNum={myNum} myTeam={myTeam} pilot={pilot} now={now} stale={stale} nA={nA} nB={nB} setNA={setNA} setNB={setNB} />;
 }
 
-// fenêtre unique : « Classement » à gauche, « Autour de nous sur la piste » à droite
-function BothWindow({ cars, num, now, prio, alerts, myPos, pilot, lapEnd, cl, setCl, compute, getOuts, onClose }) {
+// « Sortis des stands » : voitures apparues en « out » des stands, relevées N secondes après notre passage de la ligne
+function OutsPane({ getOuts, lapEnd, now }) {
+  const [outDelay, setOutDelayRaw] = useState(() => {
+    const v = Number(getLS("pitboard_around_outdelay", 15));
+    return Number.isFinite(v) && v >= 0 ? v : 15;
+  });
+  const setOutDelay = (v) => { setOutDelayRaw(v); putLS("pitboard_around_outdelay", v); };
+  const outSnap = useRef(null);
+  const sinceLine = lapEnd != null ? now - lapEnd : null;
+  if (lapEnd != null && sinceLine >= outDelay * 1000 && (!outSnap.current || outSnap.current.lapEnd !== lapEnd || outSnap.current.delay !== outDelay)) outSnap.current = { lapEnd, delay: outDelay, at: now, list: getOuts(lapEnd - 30000) };
+  const outs = outSnap.current ? { ...outSnap.current, wait: outSnap.current.lapEnd === lapEnd ? 0 : Math.max(0, Math.ceil((outDelay * 1000 - (sinceLine ?? 0)) / 1000)) } : null;
   return (
-    <WindowHost title="Classement et autour de nous" onClose={onClose} wide>
-      <div className="grid grid-cols-1 lg:grid-cols-[minmax(615px,0.85fr)_minmax(0,1.5fr)] gap-3 items-start">
-        <section className="min-w-0 overflow-x-auto rounded-lg border border-white/20 p-2">
-          <h3 className="text-white font-black uppercase tracking-wide text-sm pb-1">Classement</h3>
-          <ClassementPanel cars={cars} num={num} now={now} st={cl} setSt={setCl} big inWindow />
-        </section>
-        <section className="min-w-0 overflow-x-auto rounded-lg border border-white/20 p-2">
-          <h3 className="text-white font-black uppercase tracking-wide text-sm pb-1">Autour de nous sur la piste</h3>
-          <AroundPane compute={compute} getOuts={getOuts} lapEnd={lapEnd} prio={prio} alerts={alerts} myPos={myPos} myNum={num} myTeam={cars[num] ? cars[num].team : ""} pilot={pilot} now={now} />
-        </section>
-      </div>
-    </WindowHost>
+    <div className="text-white font-sans" style={{ fontSize: 13 }}>
+      <label className="flex flex-wrap items-center gap-1 pb-2 text-white/80">
+        Relevé
+        <input type="number" min={0} max={120} value={outDelay} onChange={(e) => setOutDelay(Math.max(0, Math.min(120, Number(e.target.value) || 0)))} className="w-16 rounded bg-black/60 border border-white/30 px-1 py-0.5 text-white" />
+        s après notre passage de la ligne
+      </label>
+      {!outs ? (
+        <div className="text-white/60">En attente de notre prochain passage de la ligne…</div>
+      ) : (
+        <>
+          <div className="pb-1 flex flex-wrap items-center gap-x-3">
+            <span className="font-black uppercase text-sky-300">Sortis des stands {outs.list.length ? `(${outs.list.length})` : ""}</span>
+            {outs.wait > 0 && <span className="text-white/60">liste précédente, mise à jour dans {outs.wait} s</span>}
+          </div>
+          {outs.list.length === 0 && <div className="text-white/60">Aucune voiture sortie des stands</div>}
+          {outs.list.map((r) => (
+            <div key={r.num} className="flex flex-wrap gap-x-3 py-1 border-t border-white/10">
+              <b>#{r.num}</b>
+              <span className="text-white/70">P{r.pos}{r.cat ? ` · ${r.cat} ${r.pic}e` : ""}</span>
+              <span className="truncate">{r.team}</span>
+              <span className="text-white/70">sortie il y a {Math.max(0, Math.round((outs.at - r.at) / 1000))} s</span>
+              {r.avgMs != null && <span className="font-mono">moy. {fmtAvgMs(r.avgMs)}</span>}
+            </div>
+          ))}
+        </>
+      )}
+    </div>
   );
 }
 
@@ -1329,7 +1330,7 @@ function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow })
 // bloc "live" d'une tuile : temps de course, tour, intermédiaires, puis (si showTable) le classement
 // avec les 3 voitures devant et les 3 derrière, leurs intermédiaires et leur écart avec nous
 function LiveBlock({ info, live, num, now, showTable, driverBest, pilot = "", part = "all", big = false }) {
-  const [bothOpen, setBothOpen] = useState(false); // fenêtre « Classement » + « Autour de nous sur la piste »
+  const [wins, setWins] = useState({ cl: false, ar: false, ou: false }); // 3 fenêtres flottantes indépendantes
   const [cl, setClRaw] = useState(loadClassement); // réglages du tableau « Classement » (mémorisés sur l'appareil)
   const setCl = (patch) =>
     setClRaw((p) => {
@@ -1361,36 +1362,48 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, pilot = "", pa
       {fmtMs(v)}
     </span>
   );
-  const bothBtnProps = {
-    type: "button",
-    onClick: () => setBothOpen(true),
-    className: "rounded border border-white/40 bg-black/40 hover:bg-black/60 px-2 py-1 text-white font-black uppercase tracking-wide whitespace-nowrap font-sans",
-    title: "Classement (général ou catégorie) et voitures autour de nous sur la piste, dans une fenêtre déplaçable ou séparée",
-  };
-  const bothWindow = bothOpen
-    ? createPortal(
-        <BothWindow
-          cars={info.cars}
-          num={num}
-          now={now}
-          prio={prio}
-          alerts={trackRows}
-          pilot={pilot}
-          myPos={live.pos}
-          lapEnd={info.cars[num] ? info.cars[num].lapEnd : null}
-          cl={cl}
-          setCl={setCl}
-          compute={(na, nb2) => aroundOnTrack(info.cars, num, now, undefined, undefined, na, nb2)}
-          getOuts={(since) => pitOutCars(info.cars, num, since)}
-          onClose={() => setBothOpen(false)}
-        />,
-        document.body
-      )
-    : null;
+  const toggleWin = (k) => setWins((w) => ({ ...w, [k]: !w[k] }));
+  const winBtn = "rounded border border-white/40 bg-black/40 hover:bg-black/60 px-2 py-1 text-white font-black uppercase tracking-wide whitespace-nowrap font-sans";
+  const myCarLive = info.cars[num];
+  const closeWin = (k) => () => setWins((w) => ({ ...w, [k]: false }));
+  const windowsEl = createPortal(
+    <>
+      {wins.cl && (
+        <WindowHost title="Classement" storeKey="cl" startPos={{ x: 16, y: 72 }} onClose={closeWin("cl")}>
+          <ClassementPanel cars={info.cars} num={num} now={now} st={cl} setSt={setCl} big inWindow />
+        </WindowHost>
+      )}
+      {wins.ar && (
+        <WindowHost title="Autour de nous sur la piste" storeKey="ar" startPos={{ x: 70, y: 110 }} wide onClose={closeWin("ar")}>
+          <AroundPane
+            compute={(na, nb2) => aroundOnTrack(info.cars, num, now, undefined, undefined, na, nb2)}
+            prio={prio}
+            alerts={trackRows}
+            myPos={live.pos}
+            myNum={num}
+            myTeam={myCarLive ? myCarLive.team : ""}
+            pilot={pilot}
+            now={now}
+          />
+        </WindowHost>
+      )}
+      {wins.ou && (
+        <WindowHost title="Sortis des stands" storeKey="ou" startPos={{ x: 120, y: 150 }} onClose={closeWin("ou")}>
+          <OutsPane getOuts={(since) => pitOutCars(info.cars, num, since)} lapEnd={myCarLive ? myCarLive.lapEnd : null} now={now} />
+        </WindowHost>
+      )}
+    </>,
+    document.body
+  );
   const tableEl = nb ? (
     <>
-      <button {...bothBtnProps}>☰ Classement et autour de nous</button>
-      {bothWindow}
+      <div className="flex flex-wrap gap-1.5">
+        <button type="button" onClick={() => toggleWin("cl")} className={winBtn} title="Classement général ou par catégorie, dans une fenêtre déplaçable ou séparée">☰ Classement</button>
+        <button type="button" onClick={() => toggleWin("ar")} className={winBtn} title="Voitures autour de nous sur la piste, dans une fenêtre déplaçable ou séparée">☰ Autour de nous</button>
+        <button type="button" onClick={() => toggleWin("ou")} className={winBtn} title="Voitures sorties des stands, dans une fenêtre déplaçable ou séparée">☰ Sortis des stands</button>
+        <button type="button" onClick={() => setWins({ cl: true, ar: true, ou: true })} className={winBtn} title="Ouvrir les 3 fenêtres">▦ Les 3</button>
+      </div>
+      {windowsEl}
     </>
   ) : null;
   if (part === "alerts") return null; // les alertes sont dans « Autour de nous sur la piste »
@@ -2095,7 +2108,8 @@ export default function PitBoard() {
 
       // démarre le tout premier relais de chaque voiture dès que l'heure de l'événement est atteinte
       // (revérifié à chaque seconde, pas seulement une fois, pour couvrir les voitures configurées après le départ)
-      if (settingsRef.current.eventStartAt) {
+      // essais / qualification : la voiture ne part pas forcément au départ du chrono ; le team manager lance le roulage lui-même
+      if (settingsRef.current.eventStartAt && (settingsRef.current.eventType || "course") === "course") {
         const startMs = new Date(settingsRef.current.eventStartAt).getTime();
         if (!isNaN(startMs) && nowMs >= startMs) {
           const configured = carsRef.current.filter((c) => c.numero && c.numero.trim() !== "");
@@ -3173,6 +3187,19 @@ export default function PitBoard() {
       prevId: n > 1 ? resolveRelay(cfg, n - 1).id : null,
       totals: driverTotals(cfg, log, current),
     };
+  }
+
+  // essais : le team manager (ou l'admin) indique que la voiture est partie sur la piste ; la consommation démarre à ce moment
+  function startRun(carId) {
+    const st = stintsRef.current[carId] || { lastExitAt: null, log: [] };
+    if (st.lastExitAt) return;
+    pushStints({ ...stintsRef.current, [carId]: { ...st, lastExitAt: Date.now() } });
+  }
+  // essais : annule un lancement fait par erreur (seulement avant le premier arrêt)
+  function cancelRun(carId) {
+    const st = stintsRef.current[carId] || { lastExitAt: null, log: [] };
+    if (!st.lastExitAt || (st.log || []).length > 0) return;
+    pushStints({ ...stintsRef.current, [carId]: { ...st, lastExitAt: null } });
   }
 
   function logStintExit(carId, idleSec) {
@@ -4824,6 +4851,18 @@ export default function PitBoard() {
                                 );
                                 return (
                                   <div className="text-[10px] text-white/70 flex flex-col gap-1">
+                                    {!st.lastExitAt && !call && !myCar && settings.eventType !== "course" && (st.log || []).length === 0 && (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          startRun(car.id);
+                                        }}
+                                        className="self-start px-2 py-1 rounded font-black uppercase text-[10px] bg-green-500 text-black hover:bg-green-400"
+                                      >
+                                        🏁 Voiture sur la piste
+                                      </button>
+                                    )}
                                     {st.lastExitAt && !call && !myCar && (
                                       <div className="font-mono font-bold text-white">
                                         Durée du relais : {fmtTimeHMS((now - st.lastExitAt) / 1000)}
@@ -5004,6 +5043,10 @@ export default function PitBoard() {
                           lapsKm={myLive && myLive.laps != null && settings.circuitLengthKm > 0 ? myLive.laps * settings.circuitLengthKm : 0}
                           savedValue={myCar.initialConsoL100}
                           onSave={(v) => updateCar(myCar.id, "initialConsoL100", v)}
+                          running={!!(stM && stM.lastExitAt)}
+                          canCancel={!!(stM && stM.lastExitAt && (stM.log || []).length === 0)}
+                          onStart={() => startRun(myCar.id)}
+                          onCancel={() => cancelRun(myCar.id)}
                         />
                       ) : (
                       <div className="rounded-xl bg-black/80 border-2 px-3 py-1.5 flex items-center gap-3" style={{ borderColor: fuelColor }}>
