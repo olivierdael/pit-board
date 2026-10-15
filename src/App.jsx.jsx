@@ -570,57 +570,6 @@ function mergeStintEntry(log, entry) {
 
 // champ texte qui n'enregistre qu'en quittant le champ (ou sur Entrée) : pas d'aller-retour
 // avec les autres postes pendant la frappe
-// Vidéo MyRacesLive d'une voiture : lecteur intégré (si la plateforme l'autorise) + lien de secours
-function CarVideo({ url, always }) {
-  const [open0, setOpen] = useState(false);
-  const open = always || open0;
-  const clean = typeof url === "string" ? url.trim() : "";
-  if (!/^https?:\/\//i.test(clean)) return null;
-  // liens YouTube (watch, youtu.be, live, embed) -> lecteur intégré ; sinon l'adresse telle quelle
-  let src = clean;
-  const yt = clean.match(/(?:youtube\.com\/(?:watch\?(?:.*&)?v=|live\/|embed\/|shorts\/)|youtu\.be\/)([\w-]{11})/i);
-  if (yt) src = "https://www.youtube.com/embed/" + yt[1] + "?autoplay=1&mute=1";
-  return (
-    <div className="pt-1 border-t border-white/10">
-      <div className="flex items-center gap-2">
-        {!always && (
-          <button
-            onClick={() => setOpen((o) => !o)}
-            className="px-2 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-[11px] font-bold uppercase tracking-wide"
-          >
-            {open ? "Masquer la vidéo" : "▶ Vidéo live"}
-          </button>
-        )}
-        <a
-          href={clean}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="px-2 py-1 rounded bg-white/10 hover:bg-white/20 text-white text-[11px] font-bold uppercase tracking-wide"
-        >
-          Ouvrir dans un onglet ↗
-        </a>
-      </div>
-      {open && (
-        <div className="mt-2">
-          <div className="relative w-full" style={{ paddingTop: "56.25%" }}>
-            <iframe
-              src={src}
-              title="Vidéo MyRacesLive"
-              className="absolute inset-0 w-full h-full rounded bg-black"
-              allow="autoplay; fullscreen; picture-in-picture"
-              allowFullScreen
-              referrerPolicy="strict-origin-when-cross-origin"
-            />
-          </div>
-          <div className="text-[10px] text-white/50 mt-1">
-            Si l'image reste noire, la plateforme refuse l'intégration : utilisez « Ouvrir dans un onglet ».
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 // Team manager : ajuste automatiquement la taille de l'écran pour que tout tienne dans la fenêtre (16/9), sans défilement.
 // Le contenu est réduit uniquement si nécessaire (jamais agrandi) ; sur téléphone / petite largeur, rien n'est modifié.
 function FitToScreen({ children, reserve = 150, min = 0.45 }) {
@@ -1093,7 +1042,7 @@ function AroundTable({ data, prio, alerts, myPos, myNum, myTeam, pilot, now, sta
   );
 }
 
-// Fenêtre flottante, déplaçable à la souris (barre de titre) ou avec ◀ ▶ : la vidéo reste visible et utilisable derrière
+// Fenêtre flottante, déplaçable à la souris (barre de titre) ou avec ◀ ▶ : le reste de l'écran reste visible et utilisable derrière
 function FloatingPanel({ title, onClose, onPopout, wide, children }) {
   const KEY = "pitboard_around_pos";
   const box = useRef(null);
@@ -5034,8 +4983,6 @@ export default function PitBoard() {
                 }
                 // team manager : une seule tuile, centrée
                 if (myCar) {
-                  const vurl = (settings.carVideos || {})[myCar.id];
-                  const hasVideo = typeof vurl === "string" && /^https?:\/\//i.test(vurl.trim());
                   const myLive = liveInfo && liveInfo.relayAlive ? liveFor(myCar) : null;
                   // jauge d'essence (tours restants) et temps du relais du pilote, en évidence au-dessus de la tuile
                   const stM = stints[myCar.id];
@@ -5106,17 +5053,6 @@ export default function PitBoard() {
                     <div className="w-full grid gap-2 items-start rounded-2xl bg-black/65 p-2 grid-cols-1 lg:grid-cols-[58%_minmax(0,1fr)] xl:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)]">
                       <div className="w-full order-2 lg:order-1">{carTiles.map((t) => renderTile(t))}</div>
                       <div className="order-1 lg:order-3 max-lg:contents lg:sticky lg:top-0 lg:flex lg:flex-col lg:gap-2">
-                        {hasVideo ? (
-                          <div className="w-full max-lg:max-w-[260px] max-lg:mx-auto max-lg:sticky max-lg:top-0 max-lg:z-30 max-lg:order-1 rounded-2xl bg-neutral-900/95 p-2 shadow-lg">
-                            <CarVideo url={vurl} always />
-                          </div>
-                        ) : (
-                          <div className="max-lg:hidden w-full rounded-2xl bg-neutral-900/70 border border-white/15 p-2 shadow-lg">
-                            <div className="w-full flex items-center justify-center text-center text-white/45 text-xs font-semibold px-4" style={{ aspectRatio: "16 / 9" }}>
-                              Fenêtre vidéo vide : ajoutez le lien MyRacesLive dans « Configuration des voitures »
-                            </div>
-                          </div>
-                        )}
                         {myLive && (
                           <div className="w-full max-lg:order-3">
                             <LiveBlock
@@ -5584,25 +5520,6 @@ export default function PitBoard() {
                           />
                         </div>
                       )}
-                      <div className="flex items-center gap-2">
-                        <label className="text-white/60 text-[10px] uppercase tracking-widest whitespace-nowrap">
-                          Lien vidéo MyRacesLive
-                        </label>
-                        <input
-                          type="url"
-                          placeholder="https://…"
-                          value={(settings.carVideos || {})[c.id] || ""}
-                          onFocus={() => (editingSetupRef.current = true)}
-                          onBlur={() => (editingSetupRef.current = false)}
-                          onChange={(e) =>
-                            pushSettings({
-                              ...settings,
-                              carVideos: { ...(settings.carVideos || {}), [c.id]: e.target.value.trim() },
-                            })
-                          }
-                          className="flex-1 min-w-0 px-2 py-0.5 text-sm rounded bg-black/50 text-white border border-white/20 focus:outline-none focus:border-white"
-                        />
-                      </div>
                       <div className="flex items-center gap-2">
                         <label className="text-white/60 text-[10px] uppercase tracking-widest">
                           Couleur 1
