@@ -7,6 +7,7 @@
 //       relays: { "1": { d: idPilote, ok: true|false } }   // pilote retenu pour le relais n
 //       ,best:    { [idPilote]: { s1, s2, s3, lap } }  // meilleurs temps en ms (flux live)
 //       ,endLaps: { "1": 28, "2": 50 }               // tour atteint à la fin de chaque relais
+//       ,laps:    { [idPilote]: [[n, total, s1, s2, s3], ...] }  // chaque tour terminé (ms), pour l'export
 //     }
 //   }
 // "ok: true" = confirmé par le team manager ; "ok: false" = pilote seulement prévu.
@@ -25,6 +26,7 @@ export function getCfg(drivers, carId) {
     relays: c && c.relays && typeof c.relays === "object" ? c.relays : {},
     best: c && c.best && typeof c.best === "object" ? c.best : {}, // meilleurs temps par pilote (ms)
     endLaps: c && c.endLaps && typeof c.endLaps === "object" ? c.endLaps : {}, // n° de tour à la fin de chaque relais
+    laps: c && c.laps && typeof c.laps === "object" ? c.laps : {}, // tours enregistrés par pilote
   };
 }
 
@@ -140,7 +142,7 @@ export function driverTotals(cfg, log, current) {
 export function resetDriverRelays(drivers) {
   const out = {};
   Object.keys(drivers || {}).forEach((carId) => {
-    out[carId] = { ...drivers[carId], relays: {}, best: {}, endLaps: {} };
+    out[carId] = { ...drivers[carId], relays: {}, best: {}, endLaps: {}, laps: {} };
   });
   return out;
 }
@@ -197,4 +199,67 @@ export function mergeBest(best, obs) {
     }
   });
   return out;
+}
+
+// ---- tours enregistrés par pilote (S1, S2, S3, total) ----
+export const MAX_LAPS_PER_DRIVER = 700;
+
+// ajoute un tour terminé au pilote (n = numéro du tour ; ignoré si déjà noté). Renvoie la même cfg si rien ne change.
+export function recordLap(cfg, driverId, lap) {
+  if (!driverId || !lap || !(lap.n > 0) || !(lap.total > 0)) return cfg;
+  const list = cfg.laps[driverId] || [];
+  if (list.some((r) => r[0] === lap.n)) return cfg;
+  const row = [lap.n, lap.total, lap.s1 ?? null, lap.s2 ?? null, lap.s3 ?? null];
+  const next = [...list, row].slice(-MAX_LAPS_PER_DRIVER);
+  return { ...cfg, laps: { ...cfg.laps, [driverId]: next } };
+}
+
+// lignes d'un pilote [{ n, total, s1, s2, s3 }] dans l'ordre des tours
+export function driverLapRows(cfg, driverId) {
+  return (cfg.laps[driverId] || []).map((r) => ({ n: r[0], total: r[1], s1: r[2], s2: r[3], s3: r[4] }));
+}
+
+// meilleurs temps (ms) parmi les tours enregistrés : { total, s1, s2, s3 } (null si aucun)
+export function lapBests(rows) {
+  const out = { total: null, s1: null, s2: null, s3: null };
+  rows.forEach((r) => {
+    ["total", "s1", "s2", "s3"].forEach((k) => {
+      const v = r[k];
+      if (typeof v === "number" && v > 0 && (out[k] == null || v < out[k])) out[k] = v;
+    });
+  });
+  return out;
+}
+
+const fmtLapMs = (ms) => {
+  if (typeof ms !== "number" || !(ms > 0)) return "";
+  const m = Math.floor(ms / 60000);
+  const s = (ms - m * 60000) / 1000;
+  return m > 0 ? `${m}:${s.toFixed(3).padStart(6, "0")}` : s.toFixed(3);
+};
+
+// CSV (séparateur « ; », ouvrable dans Excel) de tous les pilotes d'une voiture
+export function lapsToCsv(cfg, carNumero, nameOf) {
+  const esc = (v) => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
+  const rows = [["Voiture", "Pilote", "Tour", "S1", "S2", "S3", "Temps du tour", "Meilleur total", "Meilleur S1", "Meilleur S2", "Meilleur S3"]];
+  cfg.list.forEach((d) => {
+    const lr = driverLapRows(cfg, d.id);
+    const b = lapBests(lr);
+    lr.forEach((r) => {
+      rows.push([
+        carNumero,
+        nameOf(d),
+        r.n,
+        fmtLapMs(r.s1),
+        fmtLapMs(r.s2),
+        fmtLapMs(r.s3),
+        fmtLapMs(r.total),
+        r.total === b.total ? "oui" : "",
+        r.s1 != null && r.s1 === b.s1 ? "oui" : "",
+        r.s2 != null && r.s2 === b.s2 ? "oui" : "",
+        r.s3 != null && r.s3 === b.s3 ? "oui" : "",
+      ]);
+    });
+  });
+  return "\ufeff" + rows.map((r) => r.map(esc).join(";")).join("\r\n");
 }
