@@ -27,7 +27,7 @@ import {
   lapBests,
   lapsToCsv,
 } from "./lib/drivers";
-import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, trackAlertRows, aroundOnTrack, pitOutCars, classPositions } from "./lib/liveView";
+import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, fcyFromRc, trackAlertRows, aroundOnTrack, pitOutCars, classPositions } from "./lib/liveView";
 import {
   Flag,
   Plus,
@@ -1238,7 +1238,7 @@ function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow })
     const all = neighborsOf(cars, num, 115);
     const cls = classPositions(cars);
     const keep = (r) => !cat || ((cls[r.num] || {}).cat || "") === ((cls[num] || {}).cat || "");
-    const mkf = (r) => ({ num: r.num, pos: r.pos, pic: (cls[r.num] || {}).pic ?? null, gapMs: null, point: null, gainMs: null });
+    const mkf = (r) => ({ num: r.num, pos: r.pos, pic: (cls[r.num] || {}).pic ?? null, gapMs: null, point: null, gainMs: null, lapGainMs: null });
     ahead = all ? all.above.filter(keep).slice(-st.nA).map(mkf) : [];
     behind = all ? all.below.filter(keep).slice(0, st.nB).map(mkf) : [];
   }
@@ -1247,7 +1247,7 @@ function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow })
   const hl = (v, b, onMe) => (isBest(v, b) ? { color: onMe ? "#0033cc" : BLUE, fontWeight: 800 } : undefined);
   const colList = [[inWindow ? "2.4rem" : "2rem", cat ? "PIC" : "Pos"], [inWindow ? "minmax(6rem,1fr)" : "minmax(1.5rem,1fr)", "Voiture"]];
   colList.push([inWindow ? "3rem" : "1.7rem", "Tours"]);
-  colList.push([inWindow ? "4.2rem" : "3.6rem", "Tour"], [inWindow ? "3rem" : "2.3rem", "S1"], [inWindow ? "3rem" : "2.3rem", "S2"], [inWindow ? "3rem" : "2.3rem", "S3"], [inWindow ? "5.2rem" : "3.4rem", "Écart"], [inWindow ? "3.4rem" : "2.5rem", "Gain"]);
+  colList.push([inWindow ? "4.2rem" : "3.6rem", "Tour"], [inWindow ? "3rem" : "2.3rem", "S1"], [inWindow ? "3rem" : "2.3rem", "S2"], [inWindow ? "3rem" : "2.3rem", "S3"], [inWindow ? "5.2rem" : "3.4rem", "Écart"], [inWindow ? "3.4rem" : "2.5rem", "Gain"], [inWindow ? "4.4rem" : "3rem", "Σ tour"]);
   const cols = { gridTemplateColumns: colList.map((c) => c[0]).join(" ") };
   const rowCls = `grid items-center gap-x-1.5 font-mono whitespace-nowrap ${tcls}`;
   const gapCell = (r, isAhead) => {
@@ -1262,9 +1262,9 @@ function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow })
     if (me.gl != null && c.gl != null) return fmtGapMs(Math.max(0, isAhead ? me.gl - c.gl : c.gl - me.gl));
     return "–";
   };
-  const gainCell = (r) => {
-    if (r.gainMs == null) return <span className="text-white/30">–</span>;
-    const g = r.gainMs / 1000;
+  const gainCell = (r, key = "gainMs") => {
+    if (r[key] == null) return <span className="text-white/30">–</span>;
+    const g = r[key] / 1000;
     if (Math.abs(g) < 0.05) return <span className="rounded px-1 bg-white/20 text-white font-black">0.0</span>;
     return g > 0 ? <span className="rounded px-1 bg-green-600 text-white font-black">+{g.toFixed(1)}</span> : <span className="rounded px-1 bg-red-600 text-white font-black">−{Math.abs(g).toFixed(1)}</span>;
   };
@@ -1284,6 +1284,7 @@ function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow })
         <span style={hl(c.s3, c.s3b, isMe)}>{fmtSec1(c.s3)}</span>
         <span className="text-right">{isMe ? "" : <>{isAhead ? "▲ " : "▼ "}{gapCell(r, isAhead)}</>}</span>
         <span className="text-right">{isMe ? "" : gainCell(r)}</span>
+        <span className="text-right border-l-2 border-white/50 pl-1.5">{isMe ? "" : gainCell(r, "lapGainMs")}</span>
       </div>
     );
   };
@@ -1312,7 +1313,7 @@ function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow })
       </div>
       <div className={`${rowCls} px-1 text-white/60 uppercase`} style={cols}>
         {colList.map((c, i) => (
-          <span key={i} className={c[1] === "Écart" || c[1] === "Gain" ? "text-right" : ""}>{c[1]}</span>
+          <span key={i} className={c[1] === "Écart" || c[1] === "Gain" ? "text-right" : c[1] === "Σ tour" ? "text-right border-l-2 border-white/50 pl-1.5" : ""} title={c[1] === "Σ tour" ? "Gain ou perte cumulé S1 + S2 + S3 sur le tour en cours (tour complet une fois la ligne franchie)" : undefined}>{c[1]}</span>
         ))}
       </div>
       {ahead.map((r) => line(r, true, false))}
@@ -1320,7 +1321,7 @@ function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow })
       {behind.map((r) => line(r, false, false))}
       {inWindow && (
         <div className="text-white/50 font-sans text-xs pt-1">
-          Écart mesuré à chaque point (S1, S2, L = ligne) franchi par la voiture et par nous. Gain : temps pris (vert +) ou perdu (rouge −) sur la voiture dans le dernier tronçon.
+          Écart mesuré à chaque point (S1, S2, L = ligne) franchi par la voiture et par nous. Gain : temps pris (vert +) ou perdu (rouge −) sur la voiture dans le dernier tronçon. Σ tour : cumul S1 + S2 + S3 en direct, donc le total sur le tour complet une fois la ligne franchie.
         </div>
       )}
     </div>
@@ -2422,23 +2423,27 @@ export default function PitBoard() {
         }
         lastSeenFlagRef.current = cur;
       }
-      lastFeedFlagRef.current = live.flag;
+      // un full course yellow / safety car annoncé par la direction de course compte comme drapeau jaune
+      // (même si l'état de piste du flux reste vert) : les temps de relais le comptent alors en jaune
+      let eff = live.flag;
+      if ((!eff || eff === "vert") && fcyFromRc(live.rc, live.generatedAt) === true) eff = "jaune";
+      lastFeedFlagRef.current = eff;
 
       if (!settingsRef.current.liveFlagAuto) return;
-      if (!live.flag) return; // état de piste vide ou inconnu : pas de changement automatique
+      if (!eff) return; // état de piste vide ou inconnu : pas de changement automatique
       if (live.status === "FINISHED") return;
       if (nowMs - live.generatedAt > 90000) return; // flux ancien : on ne touche pas au drapeau
       const ov = manualOverrideRef.current;
       if (ov) {
-        if (ov.feedFlag === live.flag) return;
+        if (ov.feedFlag === eff) return;
         manualOverrideRef.current = null;
       }
       // un rouge posé à la main se lève à la main ; un rouge venu du flux se lève avec lui
       if (cur === "rouge" && autoPushedFlagRef.current !== "rouge") return;
-      if (cur === live.flag) return;
-      autoPushedFlagRef.current = live.flag;
-      lastSeenFlagRef.current = live.flag;
-      if (pushFlagRef.current) pushFlagRef.current(live.flag);
+      if (cur === eff) return;
+      autoPushedFlagRef.current = eff;
+      lastSeenFlagRef.current = eff;
+      if (pushFlagRef.current) pushFlagRef.current(eff);
     }
 
     // meilleurs intermédiaires / meilleur tour PAR PILOTE : chaque valeur nouvelle du flux est
@@ -4613,7 +4618,7 @@ export default function PitBoard() {
                         ref={(el) => {
                           if (el) tileNodesRef.current[car.id] = el;
                         }}
-                        className={`rounded-2xl shadow-lg transition-shadow ${compact ? "p-1.5" : "p-2"}`}
+                        className={`rounded-2xl shadow-lg transition-shadow ${compact ? "p-1.5" : "p-2"}${myCar ? " pb-bigtext" : ""}`}
                         style={{
                           backgroundColor: "#0a0a0a",
                           backgroundImage: `repeating-linear-gradient(45deg, ${car.couleur1} 0px, ${car.couleur1} 14px, ${car.couleur2 || "#0a0a0a"} 14px, ${car.couleur2 || "#0a0a0a"} 28px)`,

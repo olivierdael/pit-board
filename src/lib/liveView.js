@@ -476,7 +476,7 @@ export function aroundOnTrack(cars, myNum, nowMs, store = paceStore, hist = lapS
     if (num === myNum) continue;
     const c = cars[num];
     if (!c) continue;
-    const base = { num, team: c.team, pos: c.pos, cat: (cls[num] || {}).cat || "", pic: (cls[num] || {}).pic ?? null, lapsDiff: c.laps != null && me.laps != null ? c.laps - me.laps : null, gapMs: null, point: null, trendMs: null, gainMs: null, avgMs: null, deltaMs: null, pit: false };
+    const base = { num, team: c.team, pos: c.pos, cat: (cls[num] || {}).cat || "", pic: (cls[num] || {}).pic ?? null, lapsDiff: c.laps != null && me.laps != null ? c.laps - me.laps : null, gapMs: null, point: null, trendMs: null, gainMs: null, lapGainMs: null, avgMs: null, deltaMs: null, pit: false };
     const xAvg = lapAverage(num, hist);
     base.avgMs = xAvg ? xAvg.ms : null;
     base.deltaMs = xAvg && myAvg ? xAvg.ms - myAvg.ms : null;
@@ -513,7 +513,20 @@ export function aroundOnTrack(cars, myNum, nowMs, store = paceStore, hist = lapS
         if (Math.abs(gainMs) > 20000) gainMs = null; // tronçons non comparables (tours différents) : pas d'affichage
       }
     }
-    rows.push({ ...base, gapMs: g0, point: ["S1", "S2", "Ligne"][myPts[cp.ai].k], trendMs, gainMs });
+    // cumul S1 + S2 + S3 en direct : gain / perte depuis le dernier passage de la ligne commun (tour complet une fois la ligne franchie)
+    let lapGainMs = null;
+    {
+      const k = myPts[cp.ai].k;
+      const r = k === 2 ? cp.ai - 3 : k === 1 ? cp.ai - 2 : cp.ai - 1; // point « ligne » qui sert de départ
+      if (r >= 0 && myPts[r].k === 2 && !myPts[r].bad && !myPts[cp.ai].bad && !xPts[cp.bi].bad) {
+        const xr = nearestSame(xPts, 2, myPts[r].t, 0.45 * myLap);
+        if (xr >= 0 && !xPts[xr].bad) {
+          const v = g0 - (xPts[xr].t - myPts[r].t);
+          if (Math.abs(v) <= 40000) lapGainMs = v; // au-delà : tours non comparables
+        }
+      }
+    }
+    rows.push({ ...base, gapMs: g0, point: ["S1", "S2", "Ligne"][myPts[cp.ai].k], trendMs, gainMs, lapGainMs });
   }
   let ahead, behind;
   if (byClass) {
@@ -746,4 +759,27 @@ export function trackAlertRows(prio, myPos = null) {
     if (kind) out.push({ ...d, kind, small: d.dir === "threat" && d.remainingMs > 30000 });
   }
   return out;
+}
+
+// Full course yellow / safety car annoncé par la direction de course : true = en cours, false = terminé, null = inconnu.
+// Le message le plus récent décide ; un début vieux de plus de maxAgeMs sans message de fin est ignoré (le drapeau du flux reprend la main).
+export function fcyFromRc(rc, refMs, maxAgeMs = 30 * 60000) {
+  let state = null;
+  let at = -1;
+  (rc || []).forEach((e) => {
+    const msg = String((e && e.message) || "");
+    if (carNumbersIn(msg).length > 0) return; // message visant une voiture précise : pas une neutralisation générale
+    let s = null;
+    if (/(END|ENDING|TERMIN|GREEN|RESUM)/i.test(msg) && /(FULL\s*COURSE|GREEN\s*FLAG|SAFETY\s*CAR|CODE\s*60)/i.test(msg)) s = false;
+    else if (/GREEN\s*FLAG/i.test(msg)) s = false;
+    else if (/FULL\s*COURSE\s*YELLOW|\bFCY\b|SAFETY\s*CAR|CODE\s*60/i.test(msg)) s = true;
+    if (s == null) return;
+    const t = (e && e.at) || 0;
+    if (t >= at) {
+      at = t;
+      state = s;
+    }
+  });
+  if (state === true && refMs && at > 0 && refMs - at > maxAgeMs) return null;
+  return state;
 }

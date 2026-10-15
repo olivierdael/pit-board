@@ -1,3 +1,8 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* tuile du team manager : textes plus lisibles (les petites tailles sont relevées) */
+.pb-bigtext .text-\[9px\] { font-size: 12px; }
+.pb-bigtext .text-\[10px\] { font-size: 13px; }
+.pb-bigtext .text-\[11px\] { font-size: 14px; }
