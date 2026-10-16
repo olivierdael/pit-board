@@ -97,6 +97,25 @@ function fmtClock(ms) {
   return d.toLocaleTimeString("fr-BE", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
+// programme des séances : types, libellés, séance en cours
+const SESSION_TYPES = [
+  ["essais1", "Essais libres 1"],
+  ["essais2", "Essais libres 2"],
+  ["essais3", "Essais libres 3"],
+  ["qualification", "Qualification"],
+  ["course", "Course"],
+];
+const sessionLabel = (t) => (SESSION_TYPES.find((x) => x[0] === t) || [t, t])[1];
+// séance à appliquer à l'instant now : la dernière dont l'heure de début est passée (null si aucune n'a commencé)
+function currentSession(schedule, nowMs) {
+  let cur = null;
+  (schedule || []).forEach((s) => {
+    const t = new Date(s.startAt).getTime();
+    if (!isNaN(t) && t <= nowMs && (!cur || t >= cur.t)) cur = { s, t };
+  });
+  return cur ? cur.s : null;
+}
+
 // calcule l'état du décompte de l'événement (avant départ / en cours / terminé)
 function getEventStatus(settings, now) {
   if (!settings.eventStartAt) return null;
@@ -1905,7 +1924,9 @@ export default function PitBoard() {
     yellowSpeedKmh: 60,
     fuelWarnPct: 20,
     fuelCritPct: 10,
-    eventType: "course", // "essais1" | "essais2" | "qualification" | "course"
+    eventType: "course", // "essais1" | "essais2" | "essais3" | "qualification" | "course"
+    schedule: [], // programme des séances [{ id, type, startAt, durationSec, uuid }]
+    scheduleAppliedId: "", // séance déjà appliquée aux réglages de l'événement
     idleConsoLh: 3, // consommation au ralenti (L/h) pendant que la voiture est à l'arrêt au stand (0 km/h)
     circuitName: "",
     circuitLengthKm: 0,
@@ -2180,7 +2201,7 @@ export default function PitBoard() {
           const nextStints = { ...stintsRef.current };
           configured.forEach((car) => {
             const existing = nextStints[car.id];
-            if (!existing || (!existing.lastExitAt && (!existing.log || existing.log.length === 0))) {
+            if (!existing || ((!existing.lastExitAt || existing.lastExitAt < startMs) && (!existing.log || existing.log.length === 0))) {
               nextStints[car.id] = { lastExitAt: startMs, log: existing ? existing.log || [] : [] };
               changed = true;
             }
@@ -2191,6 +2212,17 @@ export default function PitBoard() {
     }, 1000);
     return () => clearInterval(t);
   }, []);
+
+  // programme des séances : le poste Admin applique automatiquement la séance dont l'heure de début est passée
+  useEffect(() => {
+    if (!isAdmin) return;
+    const t = setInterval(() => {
+      const cur = settingsRef.current;
+      const s = currentSession(cur.schedule, Date.now());
+      if (s && s.id !== cur.scheduleAppliedId) applySession(s);
+    }, 5000);
+    return () => clearInterval(t);
+  }, [isAdmin]);
 
   // clignotement du drapeau jaune
   useEffect(() => {
@@ -2780,6 +2812,19 @@ export default function PitBoard() {
         }
       }
     } catch (e) {}
+  }
+
+  // applique une séance du programme aux réglages de l'événement (type, début, durée, uuid RIS)
+  function applySession(s) {
+    const cur = settingsRef.current;
+    pushSettings({
+      ...cur,
+      eventType: s.type,
+      eventStartAt: s.startAt || "",
+      eventDurationSec: s.durationSec || 0,
+      ...(s.uuid ? { liveUuid: s.uuid } : {}),
+      scheduleAppliedId: s.id,
+    });
   }
 
   // réglages globaux : une seule ligne, simple update
@@ -4147,12 +4192,72 @@ export default function PitBoard() {
                   onChange={(e) => pushSettings({ ...settings, eventType: e.target.value })}
                   className="px-2 py-1.5 text-sm rounded bg-black/50 text-white border border-white/20 focus:outline-none focus:border-white"
                 >
-                  <option value="essais1">Essais libres 1</option>
-                  <option value="essais2">Essais libres 2</option>
-                  <option value="qualification">Qualification</option>
-                  <option value="course">Course</option>
+                  {SESSION_TYPES.map(([v, l]) => (
+                    <option key={v} value={v}>{l}</option>
+                  ))}
                 </select>
               </label>
+              {/* PROGRAMME DES SÉANCES */}
+              <div className="flex flex-col gap-2 p-2 rounded border border-white/15 bg-black/30">
+                <div className="text-white text-xs font-bold uppercase tracking-wide">Programme des séances</div>
+                <p className="text-white/50 text-[10px]">
+                  Encode à l'avance toutes les séances. À l'heure de début de chacune, l'appli applique toute seule le type,
+                  l'heure, la durée (et l'uuid RIS si tu l'as renseigné). Les relais déjà enregistrés ne sont pas effacés :
+                  utilise « Réinitialiser » entre deux séances si tu veux repartir de zéro.
+                </p>
+                {(settings.schedule || []).map((s) => {
+                  const upd = (patch) =>
+                    pushSettings({ ...settings, schedule: settings.schedule.map((x) => (x.id === s.id ? { ...x, ...patch } : x)) });
+                  const d = s.durationSec || 0;
+                  const active = settings.scheduleAppliedId === s.id;
+                  return (
+                    <div key={s.id} className={`grid gap-1.5 items-end p-1.5 rounded ${active ? "bg-green-500/20 border border-green-400/50" : "bg-black/30"}`} style={{ gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))" }}>
+                      <label className="flex flex-col gap-0.5 text-white text-[10px]">
+                        Séance
+                        <select value={s.type} onChange={(e) => upd({ type: e.target.value })} className="px-1.5 py-1 text-xs rounded bg-black/50 text-white border border-white/20">
+                          {SESSION_TYPES.map(([v, l]) => (
+                            <option key={v} value={v}>{l}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="flex flex-col gap-0.5 text-white text-[10px]">
+                        Début
+                        <input type="datetime-local" value={s.startAt || ""} onChange={(e) => upd({ startAt: e.target.value })} className="px-1.5 py-1 text-xs rounded bg-black/50 text-white border border-white/20" />
+                      </label>
+                      <label className="flex flex-col gap-0.5 text-white text-[10px]">
+                        Durée (h : min)
+                        <span className="flex items-center gap-1">
+                          <input type="number" min="0" value={Math.floor(d / 3600)} onChange={(e) => upd({ durationSec: Math.max(0, Number(e.target.value) || 0) * 3600 + (d % 3600) })} className="w-full px-1.5 py-1 text-xs rounded bg-black/50 text-white border border-white/20" />
+                          :
+                          <input type="number" min="0" max="59" value={Math.floor((d % 3600) / 60)} onChange={(e) => upd({ durationSec: Math.floor(d / 3600) * 3600 + Math.min(59, Math.max(0, Number(e.target.value) || 0)) * 60 })} className="w-full px-1.5 py-1 text-xs rounded bg-black/50 text-white border border-white/20" />
+                        </span>
+                      </label>
+                      <label className="flex flex-col gap-0.5 text-white text-[10px]">
+                        uuid RIS (facultatif)
+                        <input type="text" value={s.uuid || ""} onChange={(e) => upd({ uuid: e.target.value.trim() })} className="px-1.5 py-1 text-xs rounded bg-black/50 text-white border border-white/20" />
+                      </label>
+                      <div className="flex gap-1 items-center">
+                        {active && <span className="text-green-300 text-[10px] font-bold">● EN COURS</span>}
+                        <button onClick={() => applySession(s)} className="px-2 py-1 text-[10px] font-bold rounded bg-white/15 text-white" title="Applique cette séance tout de suite">Activer</button>
+                        <button onClick={() => pushSettings({ ...settings, schedule: settings.schedule.filter((x) => x.id !== s.id) })} className="px-2 py-1 text-[10px] font-bold rounded bg-red-500/30 text-white" title="Supprimer cette séance">✕</button>
+                      </div>
+                    </div>
+                  );
+                })}
+                <button
+                  onClick={() => {
+                    const used = new Set((settings.schedule || []).map((x) => x.type));
+                    const nextType = (SESSION_TYPES.find(([v]) => !used.has(v)) || SESSION_TYPES[0])[0];
+                    pushSettings({
+                      ...settings,
+                      schedule: [...(settings.schedule || []), { id: "s" + Date.now(), type: nextType, startAt: "", durationSec: nextType === "course" ? 0 : 3600, uuid: "" }],
+                    });
+                  }}
+                  className="self-start px-2.5 py-1 text-xs font-bold rounded bg-white/15 text-white"
+                >
+                  + Ajouter une séance
+                </button>
+              </div>
               {settings.eventType === "course" && (
                 <p className="text-white/50 text-[10px]">
                   Type "Course" actif — la consommation initiale (L/100km) de chaque voiture,
