@@ -106,7 +106,6 @@ const SESSION_TYPES = [
   ["qualification", "Qualification"],
   ["course", "Course"],
 ];
-const sessionLabel = (t) => (SESSION_TYPES.find((x) => x[0] === t) || [t, t])[1];
 // séance à appliquer à l'instant now : la dernière dont l'heure de début est passée (null si aucune n'a commencé)
 function currentSession(schedule, nowMs) {
   let cur = null;
@@ -1098,26 +1097,6 @@ function EssaisConsoCard({ run, tankL, lapsKm, savedValue, onSave, running, canC
   );
 }
 
-// Ligne sur une seule ligne dont la police se réduit automatiquement pour que tout le texte tienne dans la largeur
-function FitLine({ children, max = 16, min = 8, className = "", style }) {
-  const ref = useRef(null);
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    let size = max;
-    el.style.fontSize = size + "px";
-    while (el.scrollWidth > el.clientWidth + 1 && size > min) {
-      size -= 0.5;
-      el.style.fontSize = size + "px";
-    }
-  });
-  return (
-    <div ref={ref} className={`whitespace-nowrap overflow-hidden min-w-0 ${className}`} style={style}>
-      {children}
-    </div>
-  );
-}
-
 // style des alertes de la piste selon leur catégorie (voir trackAlertRows)
 const TRACK_STYLE = {
   slow: { bg: "#ff8a00", fg: "#000", blink: true, label: "🐌 !!SLOW CAR!!" },
@@ -1721,8 +1700,6 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, pilot = "", pa
   const duel = duelEstimatesTrack(info.cars, num, remMs, undefined, undefined, now) || duelEstimates(nb || neighborsOf(info.cars, num, 3), remMs);
   const prio = duel && duel.onTrack ? prioritizedDuels(duel, now) : [];
   const trackRows = trackAlertRows(prio, live.pos);
-  const K = big ? 1.3 : 1; // agrandissement des alertes quand il y a de la place
-  const fs = (n) => Math.round(n * K);
   const BLUE = "#5cc8ff"; // meilleurs temps et intermédiaires (bleu clair, bien distinct du fond)
   const tcls = big ? "text-[11px]" : "text-[10px]";
   const isBest = (v, b) => v != null && b != null && v <= b;
@@ -2323,6 +2300,7 @@ export default function PitBoard() {
   const flagHistoryRef2 = useRef([]);
   flagHistoryRef2.current = flagHistoryEff;
   const settingsRef = useRef(settings);
+  const ownSettingsWritesRef = useRef([]); // horodatages de nos propres écritures : leur écho temps réel est ignoré (il pourrait écraser une version plus récente)
   const lastKnownFlagRef = useRef(null);
   const flagTsRef = useRef(0);
   useEffect(() => {
@@ -2868,7 +2846,11 @@ export default function PitBoard() {
         });
       })
       .on("postgres_changes", { event: "UPDATE", schema: "public", table: "app_settings" }, (payload) => {
-        setSettings((local) => ({ ...local, ...payload.new.data }));
+        const t = new Date(payload.new.updated_at).getTime();
+        if (Number.isFinite(t) && ownSettingsWritesRef.current.includes(t)) return; // écho de notre propre écriture : déjà appliquée localement
+        const merged = { ...settingsRef.current, ...payload.new.data };
+        settingsRef.current = merged; // à jour tout de suite : la prochaine écriture part de la bonne version
+        setSettings(merged);
       })
       .on("postgres_changes", { event: "UPDATE", schema: "public", table: "race_flag" }, (payload) => {
         const remoteFlag = payload.new.value;
@@ -3351,8 +3333,10 @@ export default function PitBoard() {
   async function pushSettings(next) {
     settingsRef.current = next; // à jour tout de suite, avant même le prochain rendu
     setSettings(next);
+    const stamp = Date.now();
+    ownSettingsWritesRef.current = [...ownSettingsWritesRef.current, stamp].slice(-40);
     try {
-      await supabase.from("app_settings").update({ data: next, updated_at: new Date().toISOString() }).eq("id", 1);
+      await supabase.from("app_settings").update({ data: next, updated_at: new Date(stamp).toISOString() }).eq("id", 1);
     } catch (e) {}
   }
 
