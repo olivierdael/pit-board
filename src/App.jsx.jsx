@@ -2017,9 +2017,6 @@ export default function PitBoard() {
   // ils comptent dans les temps vert/jaune des relais même si le drapeau n'a pas été changé sur le poste Admin
   const [feedFlagHist, setFeedFlagHist] = useState([]);
   const [annWin, setAnnWin] = useState(false); // fenêtre des annonces détachée (team manager)
-  const flagHistoryEff = useMemo(() => mergeFlagHist(flagHistory, feedFlagHist), [flagHistory, feedFlagHist]);
-  const flagHistoryRef2 = useRef([]);
-  flagHistoryRef2.current = flagHistoryEff;
   useEffect(() => {
     flagHistoryRef.current = flagHistory;
   }, [flagHistory]);
@@ -2061,6 +2058,7 @@ export default function PitBoard() {
     rcLog: [], // historique des messages RC [{ t (ms), m }]
     liveRisUrl: "", // adresse de la page RIS à ouvrir pour le mode "page" (ex. https://live.ris-timing.be/funbe)
     liveFlagAuto: false, // drapeaux vert/jaune pilotés par le flux (le rouge reste manuel)
+    feedFlagLog: [], // changements de drapeau annoncés par le flux (état de piste, full course yellow), notés par le poste Admin : [{ flag, ts }] ; survit au F5
     drivers: {}, // pilotes par voiture : { [idVoiture]: { list, relays } } (voir lib/drivers.js)
   });
   const [showSettings, setShowSettings] = useState(false);
@@ -2092,6 +2090,12 @@ export default function PitBoard() {
   const callsRef = useRef([]);
   const messagesRef = useRef([]);
   const carsRef = useRef([]);
+  const flagHistoryEff = useMemo(
+    () => mergeFlagHist(mergeFlagHist(flagHistory, Array.isArray(settings.feedFlagLog) ? settings.feedFlagLog : []), feedFlagHist),
+    [flagHistory, settings.feedFlagLog, feedFlagHist]
+  );
+  const flagHistoryRef2 = useRef([]);
+  flagHistoryRef2.current = flagHistoryEff;
   const settingsRef = useRef(settings);
   const lastKnownFlagRef = useRef(null);
   const flagTsRef = useRef(0);
@@ -2662,6 +2666,14 @@ export default function PitBoard() {
       if ((!eff || eff === "vert") && fcyFromRc(live.rc, live.generatedAt) === true) eff = "jaune";
       lastFeedFlagRef.current = eff;
 
+      // le poste Admin note chaque changement de drapeau du flux dans les réglages partagés (indépendamment des drapeaux auto) :
+      // les temps jaune des relais restent alors justes après un F5 et sont identiques sur tous les écrans
+      if (eff && nowMs - live.generatedAt <= 90000) {
+        const fl = Array.isArray(settingsRef.current.feedFlagLog) ? settingsRef.current.feedFlagLog : [];
+        const lastF = fl.length ? fl[fl.length - 1].flag : "vert";
+        if (eff !== lastF) pushSettings({ ...settingsRef.current, feedFlagLog: [...fl, { flag: eff, ts: nowMs }].slice(-200) });
+      }
+
       if (!settingsRef.current.liveFlagAuto) return;
       if (!eff) return; // état de piste vide ou inconnu : pas de changement automatique
       if (live.status === "FINISHED") return;
@@ -3092,6 +3104,7 @@ export default function PitBoard() {
       eventDurationSec: 0,
       drivers: resetDriverRelays(settings.drivers),
       rcLog: [],
+      feedFlagLog: [],
     });
     setExpandedTiles(new Set());
     setConfirmExitId(null);
