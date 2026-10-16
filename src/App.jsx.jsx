@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useLayoutEffect, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { supabase } from "./lib/supabase";
-import { fetchLiveTiming, parseLiveTiming, normalizeCarNumber } from "./lib/risLive";
+import { fetchLiveTiming, parseLiveTiming, normalizeCarNumber, normalizeTrackState } from "./lib/risLive";
 import { RIS_ORIGIN, buildBookmarklet, readRisMessage } from "./lib/risBridge";
 import {
   MAX_DRIVERS,
@@ -27,7 +27,7 @@ import {
   lapBests,
   lapsToCsv,
 } from "./lib/drivers";
-import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, fcyFromRc, trackAlertRows, aroundOnTrack, pitOutCars, carLaps, classPositions } from "./lib/liveView";
+import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, fcyFromRc, trackAlertRows, aroundOnTrack, pitOutCars, carLaps, classPositions, pitExitInfo } from "./lib/liveView";
 import {
   Flag,
   Plus,
@@ -114,6 +114,29 @@ function currentSession(schedule, nowMs) {
     if (!isNaN(t) && t <= nowMs && (!cur || t >= cur.t)) cur = { s, t };
   });
   return cur ? cur.s : null;
+}
+
+// fusionne deux historiques de drapeaux (jaune ou rouge de l'un OU de l'autre l'emporte sur le vert)
+function mergeFlagHist(a, b) {
+  if (!b || b.length === 0) return a;
+  const at = (h, t) => {
+    let f = "vert";
+    h.forEach((e) => {
+      if (e.ts <= t) f = e.flag;
+    });
+    return f;
+  };
+  const sa = [...a].sort((x, y) => x.ts - y.ts);
+  const sb = [...b].sort((x, y) => x.ts - y.ts);
+  const ts = [...new Set([...sa, ...sb].map((e) => e.ts))].sort((x, y) => x - y);
+  const out = [];
+  ts.forEach((t) => {
+    const fa = at(sa, t);
+    const fb = at(sb, t);
+    const f = fa === "rouge" || fb === "rouge" ? "rouge" : fa === "jaune" || fb === "jaune" ? "jaune" : "vert";
+    if (!out.length || out[out.length - 1].flag !== f) out.push({ flag: f, ts: t });
+  });
+  return out;
 }
 
 // calcule l'état du décompte de l'événement (avant départ / en cours / terminé)
@@ -690,6 +713,13 @@ function downloadText(filename, text) {
 }
 
 // tours d'un pilote : S1, S2, S3 et temps total ; les meilleurs en bleu
+// tours vus sur CET écran pour une voiture (secours quand le poste Admin n'a encore rien enregistré pour le pilote)
+function localLapRows(num) {
+  return carLaps(normalizeCarNumber(num))
+    .slice()
+    .reverse()
+    .map((h) => ({ n: null, end: h.end, total: h.lt, s1: h.s ? h.s[0] : null, s2: h.s ? h.s[1] : null, s3: h.s ? h.s[2] : null }));
+}
 function DriverLapsTable({ rows }) {
   const b = lapBests(rows);
   const cell = (v, best) => (
@@ -703,7 +733,7 @@ function DriverLapsTable({ rows }) {
       <table className="w-full font-mono text-[11px] text-white/85">
         <thead className="sticky top-0 bg-neutral-900 text-white/50">
           <tr>
-            <th className="px-1.5 py-0.5 text-left">Tour</th>
+            <th className="px-1.5 py-0.5 text-left">Tour / heure</th>
             <th className="px-1.5 py-0.5 text-right">S1</th>
             <th className="px-1.5 py-0.5 text-right">S2</th>
             <th className="px-1.5 py-0.5 text-right">S3</th>
@@ -712,8 +742,8 @@ function DriverLapsTable({ rows }) {
         </thead>
         <tbody>
           {[...rows].reverse().map((r) => (
-            <tr key={r.n} className="border-t border-white/10">
-              <td className="px-1.5 py-0.5">{r.n}</td>
+            <tr key={r.n != null ? r.n : r.end} className="border-t border-white/10">
+              <td className="px-1.5 py-0.5">{r.n != null ? r.n : new Date(r.end).toLocaleTimeString("fr-BE")}</td>
               {cell(r.s1, b.s1)}
               {cell(r.s2, b.s2)}
               {cell(r.s3, b.s3)}
@@ -736,7 +766,9 @@ function DriversTimes({ ds, hasLive, carNum }) {
         const t = ds.totals[p.id];
         const isCur = ds.curDriver && ds.curDriver.id === p.id;
         const bst = ds.cfg.best[p.id];
-        const rows = driverLapRows(ds.cfg, p.id);
+        const recorded = driverLapRows(ds.cfg, p.id);
+        const useLocal = recorded.length === 0 && isCur;
+        const rows = useLocal ? localLapRows(carNum) : recorded;
         const open = openId === p.id;
         return (
           <div key={p.id} className="flex flex-col">
@@ -768,6 +800,9 @@ function DriversTimes({ ds, hasLive, carNum }) {
                 >
                   {open ? "▾" : "▸"} Tours S1 · S2 · S3 · total ({rows.length})
                 </button>
+                {open && useLocal && rows.length > 0 && (
+                  <div className="text-white/40 text-[9px] pl-1 pt-0.5">Le poste Admin n'a encore rien enregistré : voici les tours vus sur cet écran depuis son ouverture.</div>
+                )}
                 {open && <DriverLapsTable rows={rows} />}
               </div>
             )}
@@ -1114,7 +1149,7 @@ function FloatingPanel({ title, onClose, onPopout, wide, storeKey = "around", st
           <button type="button" className={btn} onClick={onClose} title="Fermer">✕</button>
         </span>
       </div>
-      <div className="overflow-y-auto p-2">{children}</div>
+      <div className="overflow-auto p-2">{children}</div>
     </div>
   );
 }
@@ -1235,28 +1270,32 @@ function OutsPane({ getOuts, lapEnd, now }) {
 }
 
 // détail d'une voiture (clic sur son nom) : meilleurs temps et derniers tours avec S1 S2 S3, les meilleurs en bleu
-function CarLapsDetail({ c, num, cols }) {
+function CarLapsDetail({ c, num }) {
   const BLUE = "#5cc8ff";
-  const laps = carLaps(num);
-  const b = (v, best) => (v != null && best != null && v <= best ? { color: BLUE, fontWeight: 800 } : undefined);
+  const [openDrv, setOpenDrv] = useState(null);
+  const laps = carLaps(num); // du plus récent au plus ancien
+  // regroupement par pilote (nom donné par le flux au moment du tour)
+  const groups = [];
+  laps.forEach((h) => {
+    const name = h.d || "Pilote ?";
+    let g = groups.find((x) => x.name === name);
+    if (!g) groups.push((g = { name, laps: [] }));
+    g.laps.push(h);
+  });
+  const mn = (arr) => arr.reduce((m, v) => (v != null && (m == null || v < m) ? v : m), null);
   const best = (lbl, v) => (
     <span>
       {lbl} <b style={{ color: BLUE }}>{v != null ? fmtMs(v) : "–"}</b>
     </span>
   );
-  return (
-    <div className="rounded bg-black/60 border border-white/20 px-2 py-1.5 my-0.5 font-sans text-[13px] text-white">
-      <div className="flex flex-wrap gap-x-4 gap-y-0.5 pb-1">
-        <b>#{num} {c.team}</b>
-        {best("Meilleur tour", c.best)}
-        {best("S1", c.s1b)}
-        {best("S2", c.s2b)}
-        {best("S3", c.s3b)}
-      </div>
-      {laps.length === 0 ? (
-        <div className="text-white/60">Aucun tour enregistré depuis l'ouverture de la page (il faut attendre le passage de la voiture).</div>
-      ) : (
-        <div style={{ maxHeight: 260, overflowY: "auto" }}>
+  const drvTable = (g) => {
+    const bt = mn(g.laps.map((h) => h.lt));
+    const b1 = mn(g.laps.map((h) => (h.s ? h.s[0] : null)));
+    const b2 = mn(g.laps.map((h) => (h.s ? h.s[1] : null)));
+    const b3 = mn(g.laps.map((h) => (h.s ? h.s[2] : null)));
+    const bl = (v, bst) => (v != null && bst != null && v <= bst ? { color: BLUE, fontWeight: 800 } : undefined);
+    return (
+      <div style={{ maxHeight: 240, overflowY: "auto" }}>
         <table className="font-mono tabular-nums">
           <thead className="text-white/50" style={{ position: "sticky", top: 0, background: "#0b0f14" }}>
             <tr>
@@ -1268,20 +1307,48 @@ function CarLapsDetail({ c, num, cols }) {
             </tr>
           </thead>
           <tbody>
-            {laps.map((h, i) => (
+            {g.laps.map((h, i) => (
               <tr key={h.end + "_" + i}>
                 <td className="pr-4 text-white/70">{new Date(h.end).toLocaleTimeString("fr-BE")}</td>
-                <td className="pr-4 text-right" style={h.s ? b(h.s[0], c.s1b) : undefined}>{h.s ? fmtMs(h.s[0]) : "–"}</td>
-                <td className="pr-4 text-right" style={h.s ? b(h.s[1], c.s2b) : undefined}>{h.s ? fmtMs(h.s[1]) : "–"}</td>
-                <td className="pr-4 text-right" style={h.s ? b(h.s[2], c.s3b) : undefined}>{h.s ? fmtMs(h.s[2]) : "–"}</td>
-                <td className="text-right" style={b(h.lt, c.best)}>{fmtMs(h.lt)}</td>
+                <td className="pr-4 text-right" style={h.s ? bl(h.s[0], b1) : undefined}>{h.s ? fmtMs(h.s[0]) : "–"}</td>
+                <td className="pr-4 text-right" style={h.s ? bl(h.s[1], b2) : undefined}>{h.s ? fmtMs(h.s[1]) : "–"}</td>
+                <td className="pr-4 text-right" style={h.s ? bl(h.s[2], b3) : undefined}>{h.s ? fmtMs(h.s[2]) : "–"}</td>
+                <td className="text-right" style={bl(h.lt, bt)}>{fmtMs(h.lt)}</td>
               </tr>
             ))}
           </tbody>
         </table>
-        </div>
+      </div>
+    );
+  };
+  return (
+    <div className="rounded bg-black/60 border border-white/20 px-2 py-1.5 my-0.5 font-sans text-[13px] text-white">
+      <div className="flex flex-wrap gap-x-4 gap-y-0.5 pb-1">
+        <b>#{num} {c.team}</b>
+        {best("Meilleur tour", c.best)}
+        {best("S1", c.s1b)}
+        {best("S2", c.s2b)}
+        {best("S3", c.s3b)}
+      </div>
+      {groups.length === 0 ? (
+        <div className="text-white/60">Aucun tour enregistré depuis l'ouverture de la page (il faut attendre le passage de la voiture).</div>
+      ) : (
+        groups.map((g, gi) => {
+          const open = openDrv === g.name || (openDrv == null && gi === 0);
+          const bt = mn(g.laps.map((h) => h.lt));
+          return (
+            <div key={g.name} className="border-t border-white/10 py-0.5">
+              <button type="button" onClick={() => setOpenDrv(open ? "__none__" : g.name)} className="w-full flex flex-wrap items-center gap-x-3 text-left font-bold">
+                <span>{open ? "▾" : "▸"} {g.name}</span>
+                <span className="text-white/60 font-normal">{g.laps.length} tour{g.laps.length > 1 ? "s" : ""}</span>
+                <span className="font-normal">meilleur <b style={{ color: BLUE }}>{fmtMs(bt)}</b></span>
+              </button>
+              {open && drvTable(g)}
+            </div>
+          );
+        })
       )}
-      <div className="text-white/50 text-xs pt-1">Bleu = meilleur temps de la voiture (tour ou secteur). Tous les tours réalisés depuis l'ouverture de la page.</div>
+      <div className="text-white/50 text-xs pt-1">Bleu = meilleur temps du pilote (tour ou secteur). Tous les tours réalisés depuis l'ouverture de la page, regroupés par pilote.</div>
     </div>
   );
 }
@@ -1323,7 +1390,7 @@ function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow })
   const hl = (v, b, onMe) => (isBest(v, b) ? { color: onMe ? "#0033cc" : BLUE, fontWeight: 800 } : undefined);
   const colList = [[inWindow ? "2.4rem" : "2rem", cat ? "PIC" : "Pos"], [inWindow ? "minmax(6rem,1fr)" : "minmax(1.5rem,1fr)", "Voiture"]];
   colList.push([inWindow ? "3rem" : "1.7rem", "Tours"]);
-  colList.push([inWindow ? "4.2rem" : "3.6rem", "Tour"], [inWindow ? "3rem" : "2.3rem", "S1"], [inWindow ? "3rem" : "2.3rem", "S2"], [inWindow ? "3rem" : "2.3rem", "S3"], [inWindow ? "5.2rem" : "3.4rem", "Écart"], [inWindow ? "3.4rem" : "2.5rem", "Gain"], [inWindow ? "4.4rem" : "3rem", "Σ tour"]);
+  colList.push([inWindow ? "4.2rem" : "3.6rem", "Tour"], [inWindow ? "3rem" : "2.3rem", "S1"], [inWindow ? "3rem" : "2.3rem", "S2"], [inWindow ? "3rem" : "2.3rem", "S3"], [inWindow ? "5.2rem" : "3.4rem", "Écart"], [inWindow ? "3.4rem" : "2.5rem", "Gain"], [inWindow ? "4.4rem" : "3rem", "Σ tour"], [inWindow ? "4.6rem" : "3.2rem", "Sortie stand"], [inWindow ? "4.6rem" : "3.2rem", "Retour est."]);
   const cols = { gridTemplateColumns: colList.map((c) => c[0]).join(" ") };
   const rowCls = `grid items-center gap-x-1.5 font-mono whitespace-nowrap ${tcls}`;
   const gapCell = (r, isAhead) => {
@@ -1363,6 +1430,23 @@ function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow })
         <span className="text-right">{isMe ? "" : <>{isAhead ? "▲ " : "▼ "}{gapCell(r, isAhead)}</>}</span>
         <span className="text-right">{isMe ? "" : gainCell(r)}</span>
         <span className="text-right border-l-2 border-white/50 pl-1.5">{isMe ? "" : gainCell(r, "lapGainMs")}</span>
+        {(() => {
+          const pi = pitExitInfo(isMe ? num : r.num);
+          const hm = (t) => new Date(t).toLocaleTimeString("fr-BE", { hour: "2-digit", minute: "2-digit" });
+          const soon = pi && pi.estIn != null && pi.estIn - now < 10 * 60000;
+          return (
+            <>
+              <span className="text-right border-l-2 border-white/50 pl-1.5" title="Heure de la dernière sortie des stands vue par cet écran">{pi ? hm(pi.at) : <span className="text-white/30">–</span>}</span>
+              <span
+                className="text-right"
+                style={soon ? { color: "#ffb020", fontWeight: 800 } : undefined}
+                title={pi && pi.estIn != null ? (pi.basis === "car" ? "Retour estimé = sortie + durée moyenne de ses relais déjà vus" : "Retour estimé = sortie + durée médiane des relais des autres voitures") : "Estimation impossible : aucun relais terminé vu pour l'instant"}
+              >
+                {pi && pi.estIn != null ? <>{hm(pi.estIn)}{pi.basis === "field" ? "~" : ""}</> : pi && pi.inPit ? <span className="text-white/40 font-sans">stand</span> : <span className="text-white/30">–</span>}
+              </span>
+            </>
+          );
+        })()}
       </div>
       {openNum === id && <CarLapsDetail c={c} num={id} cols={cols} />}
       </React.Fragment>
@@ -1393,7 +1477,7 @@ function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow })
       </div>
       <div className={`${rowCls} px-1 text-white/60 uppercase`} style={cols}>
         {colList.map((c, i) => (
-          <span key={i} className={c[1] === "Écart" || c[1] === "Gain" ? "text-right" : c[1] === "Σ tour" ? "text-right border-l-2 border-white/50 pl-1.5" : ""} title={c[1] === "Σ tour" ? "Gain ou perte cumulé S1 + S2 + S3 sur le tour en cours (tour complet une fois la ligne franchie)" : undefined}>{c[1]}</span>
+          <span key={i} className={c[1] === "Écart" || c[1] === "Gain" || c[1] === "Retour est." ? "text-right" : c[1] === "Σ tour" || c[1] === "Sortie stand" ? "text-right border-l-2 border-white/50 pl-1.5" : ""} title={c[1] === "Σ tour" ? "Gain ou perte cumulé S1 + S2 + S3 sur le tour en cours (tour complet une fois la ligne franchie)" : c[1] === "Sortie stand" ? "Heure de la dernière sortie des stands" : c[1] === "Retour est." ? "Heure estimée du prochain passage aux stands (sortie + durée de relais)" : undefined}>{c[1]}</span>
         ))}
       </div>
       {ahead.map((r) => line(r, true, false))}
@@ -1401,7 +1485,7 @@ function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow })
       {behind.map((r) => line(r, false, false))}
       {inWindow && (
         <div className="text-white/50 font-sans text-xs pt-1">
-          Écart mesuré à chaque point (S1, S2, L = ligne) franchi par la voiture et par nous. Gain : temps pris (vert +) ou perdu (rouge −) sur la voiture dans le dernier tronçon. Σ tour : cumul S1 + S2 + S3 en direct, donc le total sur le tour complet une fois la ligne franchie.
+          Écart mesuré à chaque point (S1, S2, L = ligne) franchi par la voiture et par nous. Gain : temps pris (vert +) ou perdu (rouge −) sur la voiture dans le dernier tronçon. Σ tour : cumul S1 + S2 + S3 en direct, donc le total sur le tour complet une fois la ligne franchie. Sortie stand : heure de la dernière sortie des stands. Retour est. : heure estimée du prochain arrêt (sortie + durée moyenne de ses relais vus ; ~ = médiane des autres voitures) ; orange si moins de 10 min.
         </div>
       )}
     </div>
@@ -1450,7 +1534,7 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, pilot = "", pa
   const windowsEl = createPortal(
     <>
       {wins.cl && (
-        <WindowHost title="Classement" storeKey="cl" startPos={{ x: 16, y: 72 }} onClose={closeWin("cl")}>
+        <WindowHost title="Classement" storeKey="cl" wide startPos={{ x: 16, y: 72 }} onClose={closeWin("cl")}>
           <ClassementPanel cars={info.cars} num={num} now={now} st={cl} setSt={setCl} big inWindow />
         </WindowHost>
       )}
@@ -1536,9 +1620,24 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, pilot = "", pa
           S3 {sec(live.s3, live.s3b)} <span style={{ color: BLUE }}>({fmtMs(live.s3b)})</span>
         </span>
       </div>
+      {driverBest && (() => {
+        // secours : si le poste Admin n'a rien enregistré, meilleurs temps des tours vus sur cet écran
+        let bestShown = driverBest.best && (driverBest.best.lap || driverBest.best.s1 || driverBest.best.s2 || driverBest.best.s3) ? driverBest.best : null;
+        let localNote = false;
+        if (!bestShown) {
+          const lr = localLapRows(num);
+          const mn = (k) => lr.reduce((m, r) => (r[k] != null && (m == null || r[k] < m) ? r[k] : m), null);
+          if (lr.length > 0) {
+            bestShown = { lap: mn("total"), s1: mn("s1"), s2: mn("s2"), s3: mn("s3") };
+            localNote = true;
+          }
+        }
+        driverBest = { ...driverBest, best: bestShown, localNote };
+        return null;
+      })()}
       {driverBest && (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 border-t border-white/10 pt-1">
-          <span className="text-white">Pilote {driverBest.name || "?"} :</span>
+          <span className="text-white">Pilote {driverBest.name || "?"} :{driverBest.localNote && <span className="text-white/40 text-[9px]"> (vu sur cet écran)</span>}</span>
           {driverBest.best && (driverBest.best.lap || driverBest.best.s1 || driverBest.best.s2 || driverBest.best.s3) ? (
             <>
               <span>
@@ -1895,6 +1994,13 @@ export default function PitBoard() {
   const [messages, setMessages] = useState([]);
   const [flagHistory, setFlagHistory] = useState([{ flag: "vert", ts: Date.now() }]);
   const flagHistoryRef = useRef([]);
+  // drapeaux annoncés par le flux RIS (état de piste, full course yellow du RC) tels que CET écran les a vus :
+  // ils comptent dans les temps vert/jaune des relais même si le drapeau n'a pas été changé sur le poste Admin
+  const [feedFlagHist, setFeedFlagHist] = useState([]);
+  const [annWin, setAnnWin] = useState(false); // fenêtre des annonces détachée (team manager)
+  const flagHistoryEff = useMemo(() => mergeFlagHist(flagHistory, feedFlagHist), [flagHistory, feedFlagHist]);
+  const flagHistoryRef2 = useRef([]);
+  flagHistoryRef2.current = flagHistoryEff;
   useEffect(() => {
     flagHistoryRef.current = flagHistory;
   }, [flagHistory]);
@@ -2055,6 +2161,20 @@ export default function PitBoard() {
       remainingMs: liveRow.remainingMs == null ? null : liveRow.remainingMs,
     };
   }, [settings.liveEnabled, settings.liveUuid, settings.liveSource, liveRow, now]);
+
+  // enregistre les changements de drapeau annoncés par le flux (état de piste ou full course yellow du RC)
+  const feedFlagLastRef = useRef(null);
+  useEffect(() => {
+    if (!liveInfo || !liveInfo.feedFresh) return;
+    let eff = normalizeTrackState(liveInfo.trackStateRaw);
+    if ((!eff || eff === "vert") && fcyFromRc(liveInfo.rc, liveInfo.generatedAt) === true) eff = "jaune";
+    if (!eff) return;
+    if (feedFlagLastRef.current === eff) return;
+    const first = feedFlagLastRef.current === null;
+    feedFlagLastRef.current = eff;
+    if (first && eff === "vert") return; // rien à noter tant que tout est vert
+    setFeedFlagHist((h) => [...h, { flag: eff, ts: Date.now() }]);
+  }, [liveInfo]);
 
   // données live d'une voiture (null si pas de flux, relais arrêté ou voiture absente du flux)
   function liveFor(car) {
@@ -2941,6 +3061,7 @@ export default function PitBoard() {
     setStints({});
     setTechChecks({});
     setFlagHistory([{ flag: "vert", ts: nowMs }]);
+    setFeedFlagHist(feedFlagLastRef.current && feedFlagLastRef.current !== "vert" ? [{ flag: feedFlagLastRef.current, ts: nowMs }] : []);
     setFlag("vert");
     lastKnownFlagRef.current = "vert";
     flagTsRef.current = nowMs;
@@ -3150,7 +3271,7 @@ export default function PitBoard() {
       carriedDistYellow += (log[i].jauneSec / 3600) * settings.yellowSpeedKmh;
     }
 
-    const split = computeFlagSplit(st.lastExitAt, nowMs, flagHistory);
+    const split = computeFlagSplit(st.lastExitAt, nowMs, flagHistoryEff);
     const distGreen = carriedDistGreen + (split.vertSec / 3600) * settings.greenSpeedKmh;
     const distYellow = carriedDistYellow + (split.jauneSec / 3600) * settings.yellowSpeedKmh;
     const distance = distGreen + distYellow;
@@ -3214,7 +3335,7 @@ export default function PitBoard() {
       jauneSec += log[i].jauneSec || 0;
     }
     if (st && st.lastExitAt) {
-      const split = computeFlagSplit(st.lastExitAt, nowMs, flagHistory);
+      const split = computeFlagSplit(st.lastExitAt, nowMs, flagHistoryEff);
       vertSec += split.vertSec;
       jauneSec += split.jauneSec;
     }
@@ -3227,7 +3348,7 @@ export default function PitBoard() {
     if (st.lastExitAt) {
       const nowMs = Date.now();
       const durationSec = Math.round((nowMs - st.lastExitAt) / 1000);
-      const { vertSec, jauneSec } = computeFlagSplit(st.lastExitAt, nowMs, flagHistoryRef.current);
+      const { vertSec, jauneSec } = computeFlagSplit(st.lastExitAt, nowMs, flagHistoryRef2.current);
       // tours du relais = tour atteint maintenant - tour atteint à la fin du relais précédent (flux live)
       const relayN = st.log.length + 1;
       const carObj = carsRef.current.find((c) => c.id === carId);
@@ -3277,7 +3398,7 @@ export default function PitBoard() {
     const n = log.length + 1;
     let current = null;
     if (st.lastExitAt) {
-      const split = computeFlagSplit(st.lastExitAt, now, flagHistory);
+      const split = computeFlagSplit(st.lastExitAt, now, flagHistoryEff);
       const lvNow = liveFor(car);
       const prevEnd = endLapOf(cfg, n - 1);
       current = {
@@ -5268,7 +5389,33 @@ export default function PitBoard() {
                     {topBar}
                     {rcBanner && <div className="mt-2">{rcBanner}</div>}
                     <div className="w-full grid gap-2 items-start rounded-2xl bg-black/65 p-2 grid-cols-1 lg:grid-cols-[58%_minmax(0,1fr)] xl:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)]">
-                      <div className="w-full order-2 lg:order-1">{carTiles.map((t) => renderTile(t))}</div>
+                      <div className="w-full order-2 lg:order-1">
+                        <div className="flex justify-end mb-1">
+                          <button
+                            type="button"
+                            onClick={() => setAnnWin((v) => !v)}
+                            className="rounded bg-white/15 hover:bg-white/25 px-2 py-0.5 text-white text-[11px] font-black uppercase tracking-wide"
+                            title="Détacher les annonces dans une fenêtre déplaçable, redimensionnable, ou sur un autre écran"
+                          >
+                            {annWin ? "⤓ Remettre dans la page" : "⧉ Détacher en fenêtre"}
+                          </button>
+                        </div>
+                        {annWin ? (
+                          <>
+                            <div className="rounded-xl border border-dashed border-white/30 p-3 text-white/60 text-xs text-center">
+                              Les annonces sont dans une fenêtre séparée.
+                            </div>
+                            {createPortal(
+                              <WindowHost title="Annonces" storeKey="ann" startPos={{ x: 16, y: 72 }} onClose={() => setAnnWin(false)}>
+                                {carTiles.map((t) => renderTile(t))}
+                              </WindowHost>,
+                              document.body
+                            )}
+                          </>
+                        ) : (
+                          carTiles.map((t) => renderTile(t))
+                        )}
+                      </div>
                       <div className="order-1 lg:order-3 max-lg:contents lg:sticky lg:top-0 lg:flex lg:flex-col lg:gap-2">
                         {myLive && (
                           <div className="w-full max-lg:order-3">

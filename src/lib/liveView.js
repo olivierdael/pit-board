@@ -121,6 +121,13 @@ export function updatePace(cars, store = paceStore, hist = lapStore, nowMs = Dat
       const isOut = /OUT/i.test(st);
       const isOff = OFF_TRACK.test(st);
       if (o.seen && ((isOut && !o.out) || (o.off && !isOff)) && (o.at == null || nowMs - o.at > 120000)) o.at = nowMs;
+      // entrée aux stands : on note la durée du relais qui vient de se terminer (sortie précédente -> entrée)
+      const inPit = isOff && !isOut;
+      if (o.seen && inPit && !o.inPit && o.at != null && nowMs - o.at > 300000) {
+        (o.stints || (o.stints = [])).push(nowMs - o.at);
+        if (o.stints.length > 5) o.stints.shift();
+      }
+      o.inPit = inPit;
       o.off = isOff;
       o.out = isOut;
       o.seen = true;
@@ -135,7 +142,7 @@ export function updatePace(cars, store = paceStore, hist = lapStore, nowMs = Dat
     if (c.lapEnd != null) {
       const h = hist[num] || (hist[num] = []);
       const sOk = c.s1 != null && c.s2 != null && c.s3 != null && Math.abs(c.s1 + c.s2 + c.s3 - c.last) <= 0.03 * c.last;
-      h.push({ end: c.lapEnd, lt: c.last, s: sOk ? [c.s1, c.s2, c.s3] : null });
+      h.push({ end: c.lapEnd, lt: c.last, s: sOk ? [c.s1, c.s2, c.s3] : null, d: c.driver || null });
       if (h.length > 500) h.shift();
     }
   }
@@ -167,6 +174,28 @@ export function pitOutCars(cars, myNum, sinceMs, outs = outStore, hist = lapStor
     res.push({ num, team: c.team, pos: c.pos, cat: (cls[num] || {}).cat || "", pic: (cls[num] || {}).pic ?? null, at: o.at, avgMs: a ? a.ms : null });
   }
   return res.sort((x, y) => y.at - x.at);
+}
+
+// sortie des stands d'une voiture et estimation de son prochain retour aux stands :
+// { at (heure de la dernière sortie vue), inPit, stintMs (durée de relais estimée), basis ("car" = ses propres relais vus, "field" = médiane des autres voitures, null), estIn (heure de retour estimée) }
+export function pitExitInfo(num, outs = outStore) {
+  const o = outs[num];
+  if (!o || o.at == null) return null;
+  let stintMs = null;
+  let basis = null;
+  if (o.stints && o.stints.length) {
+    stintMs = o.stints.reduce((s, v) => s + v, 0) / o.stints.length;
+    basis = "car";
+  } else {
+    const all = [];
+    Object.keys(outs).forEach((k) => (outs[k].stints || []).forEach((v) => all.push(v)));
+    if (all.length >= 3) {
+      all.sort((x, y) => x - y);
+      stintMs = all[Math.floor(all.length / 2)];
+      basis = "field";
+    }
+  }
+  return { at: o.at, inPit: !!o.inPit, stintMs, basis, estIn: stintMs != null && !o.inPit ? o.at + stintMs : null };
 }
 
 // rythme (ms/tour) = médiane des derniers tours "normaux" (on écarte les tours > 115 % du meilleur : stand, neutralisation)
