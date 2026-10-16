@@ -142,13 +142,21 @@ export function updatePace(cars, store = paceStore, hist = lapStore, nowMs = Dat
     if (c.lapEnd != null) {
       const h = hist[num] || (hist[num] = []);
       const sOk = c.s1 != null && c.s2 != null && c.s3 != null && Math.abs(c.s1 + c.s2 + c.s3 - c.last) <= 0.03 * c.last;
-      h.push({ end: c.lapEnd, lt: c.last, s: sOk ? [c.s1, c.s2, c.s3] : null, d: c.driver || null, n: c.laps });
+      h.push({ end: c.lapEnd, lt: c.last, s: sOk ? [c.s1, c.s2, c.s3] : null, d: c.driver || null, n: c.laps, tp: liveTemp });
       if (h.length > 500) h.shift();
     }
   }
 }
 // derniers tours terminés de chaque voiture : { end (heure du passage de la ligne), lt (temps du tour), s ([S1,S2,S3] ou null) }
 const lapStore = {};
+// température extérieure du moment (°C), fournie par l'application : notée avec chaque tour vu
+let liveTemp = null;
+export function setLiveTemperature(t) {
+  liveTemp = typeof t === "number" && Number.isFinite(t) ? Math.round(t * 10) / 10 : null;
+}
+export function getLiveTemperature() {
+  return liveTemp;
+}
 const outStore = {}; // { num: { off, out, at (heure de la dernière sortie des stands), seen } }
 
 // temps moyen sur les 10 derniers tours, en écartant les tours plus de 5 % plus lents que la médiane (stand, neutralisation, incident) : { ms, n } ou null

@@ -957,6 +957,50 @@ function WeatherSettings({ settings, pushSettings, weather }) {
   );
 }
 
+// historique des alertes RC : celles qui citent le numéro de la voiture sont en évidence et restent « à acquitter » jusqu'au clic sur « Vu »
+function RcHistory({ entries, num, acks, onAck, big, showEmpty }) {
+  const [onlyMine, setOnlyMine] = useState(false);
+  const mine = (l) => !!num && carNumbersIn(l.m).includes(num);
+  const key = (l) => l.t + "|" + l.m;
+  const list = onlyMine ? entries.filter(mine) : entries;
+  const pending = entries.filter((l) => mine(l) && !acks.has(key(l))).length;
+  if (entries.length === 0 && !showEmpty) return null;
+  return (
+    <div className="flex flex-col gap-1 pt-1 border-t border-white/10">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-white font-black uppercase tracking-wide text-xs">🚨 Historique des alertes RC ({entries.length})</span>
+        {pending > 0 && <span className="rounded bg-red-600 text-white text-[11px] font-black px-1.5 animate-pulse">{pending} à acquitter</span>}
+        <button type="button" onClick={() => setOnlyMine((v) => !v)} className="ml-auto rounded bg-white/15 hover:bg-white/25 px-2 py-0.5 text-white text-[10px] font-black uppercase">
+          {onlyMine ? "Voir toutes les alertes" : `Seulement #${num || "?"}`}
+        </button>
+      </div>
+      <div className="flex flex-col gap-1 overflow-y-auto" style={{ maxHeight: big ? 260 : 110 }}>
+        {list.length === 0 && <div className="text-white/50 text-xs py-1">{entries.length === 0 ? "Aucune alerte reçue pour l'instant." : `Aucune alerte ne cite #${num}.`}</div>}
+        {list.map((l, i) => {
+          const isMine = mine(l);
+          const done = acks.has(key(l));
+          return (
+            <div
+              key={l.t + "-" + i}
+              className={`rounded px-2 py-1 flex items-start gap-2 leading-snug ${isMine && !done ? "animate-pulse" : ""}`}
+              style={isMine ? { backgroundColor: done ? "#5a1414" : "#c40000", border: "2px solid #ff4040", fontSize: big ? 15 : 12 } : { color: "#ff7a7a", fontSize: big ? 13 : 11 }}
+            >
+              <span className="font-mono whitespace-nowrap font-bold">{new Date(l.t).toLocaleTimeString("fr-BE")}{l.local ? "*" : ""}</span>
+              <span className={`flex-1 min-w-0 break-words ${isMine ? "text-white font-black" : "font-semibold"}`}>
+                {isMine ? `⚠ #${num} · ` : ""}RC : {l.m}
+              </span>
+              {isMine && !done && (
+                <button type="button" onClick={() => onAck(key(l))} className="rounded bg-white text-red-700 font-black text-xs px-2 py-0.5 flex-shrink-0">✓ Vu</button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {entries.some((l) => l.local) && <div className="text-white/40 text-[10px]">* heure d'arrivée sur cet écran (le poste Admin n'a pas noté l'heure exacte).</div>}
+    </div>
+  );
+}
+
 function DraftInput({ value, onCommit, placeholder, className, disabled }) {
   const [draft, setDraft] = useState(value || "");
   const focusedRef = useRef(false);
@@ -2324,6 +2368,74 @@ export default function PitBoard() {
     };
   }, [settings.liveEnabled, settings.liveUuid, settings.liveSource, liveRow, now]);
 
+  // alertes RC : mémoire locale de cet écran (en plus de l'historique noté par le poste Admin), pour qu'aucune alerte ne soit ratée
+  const rcLocalKey = "pitboard_rclocal_" + ((settings.liveUuid || "").trim() || "x");
+  const [rcLocal, setRcLocal] = useState([]); // [{ k (id|message), t, m }]
+  useEffect(() => {
+    try {
+      const v = JSON.parse(localStorage.getItem(rcLocalKey) || "[]");
+      if (Array.isArray(v) && v.length) setRcLocal((prev) => [...v.filter((x) => !prev.some((p) => p.k === x.k)), ...prev]);
+    } catch {
+      /* stockage indisponible */
+    }
+  }, [rcLocalKey]);
+  useEffect(() => {
+    if (!liveInfo || !Array.isArray(liveInfo.rc) || liveInfo.rc.length === 0) return;
+    setRcLocal((prev) => {
+      const seen = new Set(prev.map((x) => x.k));
+      const add = [];
+      liveInfo.rc.forEach((e) => {
+        const k = e.id + "|" + e.message;
+        if (!seen.has(k)) {
+          seen.add(k);
+          add.push({ k, t: Date.now(), m: e.message });
+        }
+      });
+      return add.length ? [...prev, ...add].slice(-300) : prev;
+    });
+  }, [liveInfo]);
+  useEffect(() => {
+    if (rcLocal.length === 0) return;
+    try {
+      localStorage.setItem(rcLocalKey, JSON.stringify(rcLocal));
+    } catch {
+      /* stockage indisponible */
+    }
+  }, [rcLocal, rcLocalKey]);
+  // historique complet : celui du poste Admin (heures exactes) + ce que cet écran a vu en plus
+  const rcLogAll = useMemo(() => {
+    const admin = Array.isArray(settings.rcLog) ? settings.rcLog : [];
+    const cnt = {};
+    admin.forEach((x) => {
+      cnt[x.m] = (cnt[x.m] || 0) + 1;
+    });
+    const lc = {};
+    const extra = [];
+    rcLocal.forEach((x) => {
+      lc[x.m] = (lc[x.m] || 0) + 1;
+      if (lc[x.m] > (cnt[x.m] || 0)) extra.push({ t: x.t, m: x.m, local: true });
+    });
+    return [...admin, ...extra].sort((a, b) => a.t - b.t);
+  }, [settings.rcLog, rcLocal]);
+  // alertes acquittées (« Vu ») sur cet écran
+  const [rcAcks, setRcAcks] = useState(() => {
+    try {
+      return new Set(JSON.parse(localStorage.getItem("pitboard_rcacks") || "[]"));
+    } catch {
+      return new Set();
+    }
+  });
+  const ackRc = (k) =>
+    setRcAcks((prev) => {
+      const n = new Set(prev).add(k);
+      try {
+        localStorage.setItem("pitboard_rcacks", JSON.stringify([...n].slice(-500)));
+      } catch {
+        /* stockage indisponible */
+      }
+      return n;
+    });
+
   // météo du circuit : lue toutes les 10 minutes par chaque écran ; la température est notée avec chaque tour
   const [weather, setWeather] = useState(null);
   const [bulletin, setBulletin] = useState(null); // { w, until } : bulletin affiché à H:00 et H:30
@@ -2472,7 +2584,7 @@ export default function PitBoard() {
   // historique conservé des messages RC pour une voiture : ceux qui la citent + les messages généraux,
   // du plus récent au plus ancien (heure = première apparition dans le flux, enregistrée par le poste Admin)
   function rcLogForCar(car) {
-    const log = Array.isArray(settings.rcLog) ? settings.rcLog : [];
+    const log = rcLogAll;
     if (log.length === 0) return [];
     const n = String(Number(normalizeCarNumber(car.numero)));
     return log
@@ -3315,6 +3427,12 @@ export default function PitBoard() {
       rcLog: [],
       feedFlagLog: [],
     });
+    setRcLocal([]);
+    try {
+      localStorage.removeItem(rcLocalKey);
+    } catch {
+      /* stockage indisponible */
+    }
     setExpandedTiles(new Set());
     setConfirmExitId(null);
     setTechCarId("");
@@ -5551,22 +5669,29 @@ export default function PitBoard() {
                             </div>
                           )}
 
-                          {/* HISTORIQUE RC de cette voiture (+ messages généraux), heure réelle de parution */}
+                          {/* HISTORIQUE RC de cette voiture (+ messages généraux) ; les alertes qui citent le numéro restent à acquitter */}
                           {(() => {
                             const log = rcLogForCar(car);
-                            if (log.length === 0) return null;
-                            const shown = compact ? log.slice(0, 1) : log;
-                            return (
-                              <div
-                                className="flex flex-col gap-0.5 pt-1 border-t border-white/10 overflow-y-auto"
-                                style={{ maxHeight: compact ? undefined : 90 }}
-                              >
-                                {shown.map((l, i) => (
-                                  <div key={l.t + "-" + i} className="text-[10px] leading-snug font-semibold" style={{ color: "#ff5a5a" }}>
+                            if (compact) {
+                              if (log.length === 0) return null;
+                              const l = log[0];
+                              return (
+                                <div className="flex flex-col gap-0.5 pt-1 border-t border-white/10">
+                                  <div className="text-[10px] leading-snug font-semibold" style={{ color: "#ff5a5a" }}>
                                     <span className="font-mono">{new Date(l.t).toLocaleTimeString("fr-BE")}</span> · RC : {l.m}
                                   </div>
-                                ))}
-                              </div>
+                                </div>
+                              );
+                            }
+                            return (
+                              <RcHistory
+                                entries={log}
+                                num={String(Number(normalizeCarNumber(car.numero)))}
+                                acks={rcAcks}
+                                onAck={ackRc}
+                                big={!!myCar}
+                                showEmpty={!!myCar}
+                              />
                             );
                           })()}
                         </div>
@@ -5599,6 +5724,22 @@ export default function PitBoard() {
                   const dsT = dsM && dsM.curDriver ? dsM.totals[dsM.curDriver.id] : null;
                   const essaisM = settings.eventType !== "course";
                   // seuils d'essence : message clignotant dans la ligne rouge sous la jauge (alerte, puis PIT IN urgent)
+                  // alertes RC qui citent notre numéro et pas encore acquittées : bandeau fixe jusqu'au clic sur « Vu »
+                  const myNumStr = String(Number(normalizeCarNumber(myCar.numero)));
+                  const pendingAlerts = rcLogForCar(myCar).filter((l) => carNumbersIn(l.m).includes(myNumStr) && !rcAcks.has(l.t + "|" + l.m));
+                  const ackBanner = pendingAlerts.length > 0 ? (
+                    <div key="ackalert" className="rounded-xl px-4 py-3 shadow-lg animate-pulse" style={{ backgroundColor: "#c40000", border: "3px solid #ff4040" }} role="alert">
+                      <div className="text-white/80 text-[11px] font-bold uppercase tracking-widest">Alerte(s) de la direction de course concernant #{myNumStr} · à acquitter</div>
+                      {pendingAlerts.slice(0, 3).map((l) => (
+                        <div key={l.t + l.m} className="flex items-start gap-3 text-white">
+                          <span className="font-mono font-bold">{new Date(l.t).toLocaleTimeString("fr-BE")}</span>
+                          <span className="flex-1 min-w-0 text-xl sm:text-2xl font-black leading-snug break-words">⚠ RC : {l.m}</span>
+                          <button type="button" onClick={() => ackRc(l.t + "|" + l.m)} className="rounded bg-white text-red-700 font-black px-3 py-1 flex-shrink-0">✓ Vu</button>
+                        </div>
+                      ))}
+                      {pendingAlerts.length > 3 && <div className="text-white/80 text-sm">+ {pendingAlerts.length - 3} autre(s) dans l'historique en bas de la tuile</div>}
+                    </div>
+                  ) : null;
                   const fuelBanner = fuelM && fuelM.calibrated && fuelM.status !== "OK" ? (
                     <div
                       key="fuelalert"
@@ -5685,7 +5826,7 @@ export default function PitBoard() {
                   return (
                     <FitToScreen>
                     {topBar}
-                    {(fuelBanner || wxBanner || rcBanner) && <div className="mt-2 flex flex-col gap-2">{fuelBanner}{wxBanner}{rcBanner}</div>}
+                    {(ackBanner || fuelBanner || wxBanner || rcBanner) && <div className="mt-2 flex flex-col gap-2">{ackBanner}{fuelBanner}{wxBanner}{rcBanner}</div>}
                     <div className="w-full grid gap-2 items-start rounded-2xl bg-black/65 p-2 grid-cols-1 lg:grid-cols-[58%_minmax(0,1fr)] xl:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)]">
                       <div className="w-full order-2 lg:order-1">
                         <div className="flex justify-end mb-1">
