@@ -299,6 +299,7 @@ function speakWithSafety(utter, resolve) {
   utter.onend = finish;
   utter.onerror = finish;
   try {
+    window.speechSynthesis.resume();
     window.speechSynthesis.speak(utter);
   } catch (e) {
     finish();
@@ -719,7 +720,7 @@ function localLapRows(num) {
   return carLaps(normalizeCarNumber(num))
     .slice()
     .reverse()
-    .map((h) => ({ n: h.n ?? null, temp: h.tp ?? null, at: h.end, end: h.end, total: h.lt, s1: h.s ? h.s[0] : null, s2: h.s ? h.s[1] : null, s3: h.s ? h.s[2] : null }));
+    .map((h) => ({ n: h.n ?? null, temp: h.tp ?? null, pic: h.pc ?? null, at: h.end, end: h.end, total: h.lt, s1: h.s ? h.s[0] : null, s2: h.s ? h.s[1] : null, s3: h.s ? h.s[2] : null }));
 }
 function DriverLapsTable({ rows }) {
   const b = lapBests(rows);
@@ -739,6 +740,7 @@ function DriverLapsTable({ rows }) {
             <th className="px-1.5 py-0.5 text-right">S2</th>
             <th className="px-1.5 py-0.5 text-right">S3</th>
             <th className="px-1.5 py-0.5 text-right">Total</th>
+            <th className="px-1.5 py-0.5 text-right" title="Position dans la classe (PIC) à la fin du tour">PIC</th>
             <th className="px-1.5 py-0.5 text-right" title="Température extérieure au moment du tour">°C</th>
           </tr>
         </thead>
@@ -750,6 +752,7 @@ function DriverLapsTable({ rows }) {
               {cell(r.s2, b.s2)}
               {cell(r.s3, b.s3)}
               {cell(r.total, b.total)}
+              <td className="px-1.5 py-0.5 text-right font-bold">{r.pic != null ? `${r.pic}e` : "–"}</td>
               <td className="px-1.5 py-0.5 text-right text-white/60">{r.temp != null ? r.temp.toFixed(1) : "–"}</td>
             </tr>
           ))}
@@ -1498,6 +1501,7 @@ function CarLapsDetail({ c, num }) {
               <th className="pr-4 text-right font-normal">S2</th>
               <th className="pr-4 text-right font-normal">S3</th>
               <th className="pr-4 text-right font-normal">Tour</th>
+              <th className="pr-4 text-right font-normal" title="Position dans la classe (PIC) à la fin du tour">PIC</th>
               <th className="text-right font-normal" title="Température extérieure">°C</th>
             </tr>
           </thead>
@@ -1509,6 +1513,7 @@ function CarLapsDetail({ c, num }) {
                 <td className="pr-4 text-right" style={h.s ? bl(h.s[1], b2) : undefined}>{h.s ? fmtMs(h.s[1]) : "–"}</td>
                 <td className="pr-4 text-right" style={h.s ? bl(h.s[2], b3) : undefined}>{h.s ? fmtMs(h.s[2]) : "–"}</td>
                 <td className="pr-4 text-right" style={bl(h.lt, bt)}>{fmtMs(h.lt)}</td>
+                <td className="pr-4 text-right font-bold">{h.pc != null ? `${h.pc}e` : "–"}</td>
                 <td className="text-right text-white/60">{h.tp != null ? h.tp.toFixed(1) : "–"}</td>
               </tr>
             ))}
@@ -2269,6 +2274,28 @@ export default function PitBoard() {
   useEffect(() => {
     soundOnRef.current = soundOn;
   }, [soundOn]);
+  // après un F5, le navigateur bloque la voix tant qu'on n'a pas cliqué dans la page : le premier clic (n'importe où) la débloque
+  const [voiceReady, setVoiceReady] = useState(() => (typeof navigator !== "undefined" && navigator.userActivation ? !!navigator.userActivation.hasBeenActive : false));
+  useEffect(() => {
+    if (voiceReady) return;
+    const unlock = () => {
+      try {
+        getAudioCtx(audioCtxRef);
+        if (window.speechSynthesis) {
+          const u = new SpeechSynthesisUtterance(".");
+          u.volume = 0;
+          window.speechSynthesis.speak(u);
+        }
+      } catch (e) {}
+      setVoiceReady(true);
+    };
+    document.addEventListener("pointerdown", unlock, true);
+    document.addEventListener("keydown", unlock, true);
+    return () => {
+      document.removeEventListener("pointerdown", unlock, true);
+      document.removeEventListener("keydown", unlock, true);
+    };
+  }, [voiceReady]);
   const editingSetupRef = useRef(false);
   const callsRef = useRef([]);
   const messagesRef = useRef([]);
@@ -3017,6 +3044,7 @@ export default function PitBoard() {
     const seenByCar = {};
     const lapNoByCar = {};
     function recordBests(live) {
+      const clsAll = classPositions(live.cars);
       let drivers = settingsRef.current.drivers || {};
       let changed = false;
       carsRef.current.forEach((car) => {
@@ -3050,6 +3078,7 @@ export default function PitBoard() {
             s3: sOk ? lc.s3 : null,
             at: lc.lapEnd || Date.now(),
             temp: getLiveTemperature(),
+            pic: (clsAll[normalizeCarNumber(car.numero)] || {}).pic ?? null,
           });
         }
         if (nc !== cfg) {
@@ -4477,10 +4506,10 @@ export default function PitBoard() {
                   } catch (e) {}
                 }
               }}
-              className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide bg-white/15 text-white"
+              className={"flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide text-white " + (soundOn && !voiceReady ? "bg-amber-600 animate-pulse" : "bg-white/15")}
               title="Activer/couper l'annonce vocale — cliquez pour tester"
             >
-              {soundOn ? "🔊 Voix ON" : "🔇 Voix OFF"}
+              {soundOn ? (voiceReady ? "🔊 Voix ON" : "🔈 Voix bloquée : cliquer") : "🔇 Voix OFF"}
             </button>
             <div
               className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wide bg-white/15 text-white"

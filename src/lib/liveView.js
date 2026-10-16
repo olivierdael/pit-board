@@ -112,6 +112,7 @@ const paceStore = {};
 
 // enregistre le dernier tour de chaque voiture (une seule fois par numéro de tour)
 export function updatePace(cars, store = paceStore, hist = lapStore, nowMs = Date.now(), outs = outStore) {
+  const cls = classPositions(cars); // position dans la classe (PIC) de chaque voiture, notée avec chaque tour
   for (const num of Object.keys(cars || {})) {
     const c = cars[num];
     if (c) {
@@ -142,7 +143,7 @@ export function updatePace(cars, store = paceStore, hist = lapStore, nowMs = Dat
     if (c.lapEnd != null) {
       const h = hist[num] || (hist[num] = []);
       const sOk = c.s1 != null && c.s2 != null && c.s3 != null && Math.abs(c.s1 + c.s2 + c.s3 - c.last) <= 0.03 * c.last;
-      h.push({ end: c.lapEnd, lt: c.last, s: sOk ? [c.s1, c.s2, c.s3] : null, d: c.driver || null, n: c.laps, tp: liveTemp });
+      h.push({ end: c.lapEnd, lt: c.last, s: sOk ? [c.s1, c.s2, c.s3] : null, d: c.driver || null, n: c.laps, tp: liveTemp, pc: (cls[num] || {}).pic ?? null });
       if (h.length > 500) h.shift();
     }
   }
@@ -151,8 +152,13 @@ export function updatePace(cars, store = paceStore, hist = lapStore, nowMs = Dat
 const lapStore = {};
 // température extérieure du moment (°C), fournie par l'application : notée avec chaque tour vu
 let liveTemp = null;
-export function setLiveTemperature(t) {
+export function setLiveTemperature(t, nowMs = Date.now()) {
+  const prev = liveTemp;
   liveTemp = typeof t === "number" && Number.isFinite(t) ? Math.round(t * 10) / 10 : null;
+  // première température reçue (ouverture de la page, circuit choisi à l'instant) : les tours des 15 dernières minutes vus sans température la reçoivent
+  if (liveTemp != null && prev == null) {
+    Object.keys(lapStore).forEach((n) => lapStore[n].forEach((h) => { if (h.tp == null && h.end >= nowMs - 15 * 60000) h.tp = liveTemp; }));
+  }
 }
 export function getLiveTemperature() {
   return liveTemp;
