@@ -2200,7 +2200,23 @@ export default function PitBoard() {
   const flagHistoryRef = useRef([]);
   // drapeaux annoncés par le flux RIS (état de piste, full course yellow du RC) tels que CET écran les a vus :
   // ils comptent dans les temps vert/jaune des relais même si le drapeau n'a pas été changé sur le poste Admin
-  const [feedFlagHist, setFeedFlagHist] = useState([]);
+  // conservé dans le navigateur de CET écran : un F5 ne perd plus le temps jaune, même si aucun poste Admin ne relaie le flux
+  const FEEDFLAG_KEY = "pitboard_feedflag";
+  const [feedFlagHist, setFeedFlagHist] = useState(() => {
+    try {
+      const v = JSON.parse(localStorage.getItem(FEEDFLAG_KEY) || "[]");
+      return Array.isArray(v) ? v.filter((e) => e && typeof e.ts === "number" && typeof e.flag === "string" && Date.now() - e.ts < 36 * 3600 * 1000) : [];
+    } catch {
+      return [];
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(FEEDFLAG_KEY, JSON.stringify(feedFlagHist.slice(-200)));
+    } catch {
+      /* stockage indisponible */
+    }
+  }, [feedFlagHist]);
   const [annWin, setAnnWin] = useState(false); // fenêtre des annonces détachée (team manager)
   useEffect(() => {
     flagHistoryRef.current = flagHistory;
@@ -2540,10 +2556,12 @@ export default function PitBoard() {
     if ((!eff || eff === "vert") && fcyFromRc(liveInfo.rc, liveInfo.generatedAt) === true) eff = "jaune";
     if (!eff) return;
     if (feedFlagLastRef.current === eff) return;
-    const first = feedFlagLastRef.current === null;
     feedFlagLastRef.current = eff;
-    if (first && eff === "vert") return; // rien à noter tant que tout est vert
-    setFeedFlagHist((h) => [...h, { flag: eff, ts: Date.now() }]);
+    // on ne note que les changements par rapport au dernier état connu (y compris celui d'avant le F5)
+    setFeedFlagHist((h) => {
+      const last = h.length ? h[h.length - 1].flag : "vert";
+      return last === eff ? h : [...h, { flag: eff, ts: Date.now() }].slice(-200);
+    });
   }, [liveInfo]);
 
   // données live d'une voiture (null si pas de flux, relais arrêté ou voiture absente du flux)
