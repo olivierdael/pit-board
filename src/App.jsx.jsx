@@ -5244,18 +5244,20 @@ export default function PitBoard() {
                         )}
                       </div>
                       )}
-                      <div className="rounded-xl bg-black/80 border-2 border-white/50 px-3 py-1.5 flex items-center gap-3">
+                      <div className="rounded-xl bg-black/80 border-2 border-white/50 px-3 py-1.5 flex flex-wrap items-center gap-x-3 gap-y-0.5">
                         <span className="text-white text-sm font-black uppercase tracking-wide whitespace-nowrap">⏱ Relais {((stM && stM.log) || []).length + 1}</span>
                         <span className="font-mono font-black leading-none text-white whitespace-nowrap" style={{ fontSize: 24 }}>
                           {relaySec != null ? fmtTimeHMS(relaySec) : "--:--:--"}
                         </span>
-                        <span className="text-lg font-black text-white whitespace-nowrap">
+                        <span className="text-lg font-black text-white truncate min-w-0 max-w-full">
                           {dsM && dsM.curDriver ? driverName(dsM.curDriver) || "Pilote sans nom" : ""}
                         </span>
                         {dsT && (
-                          <span className="ml-auto text-white text-[17px] font-mono font-bold whitespace-nowrap" title="Temps de roulage total, sous drapeau vert / jaune / rouge">
-                            Σ {fmtTimeHMS(dsT.total)} 🟢{fmtTimeHMS(dsT.vert)} 🟡{fmtTimeHMS(dsT.jaune)}
-                            {dsT.rouge >= 5 && <> 🔴{fmtTimeHMS(dsT.rouge)}</>}
+                          <span className="ml-auto flex flex-wrap items-center gap-x-3 text-white text-[17px] font-mono font-bold" title="Temps de roulage total, sous drapeau vert / jaune / rouge">
+                            <span className="whitespace-nowrap">Σ {fmtTimeHMS(dsT.total)}</span>
+                            <span className="whitespace-nowrap">🟢{fmtTimeHMS(dsT.vert)}</span>
+                            <span className="whitespace-nowrap">🟡{fmtTimeHMS(dsT.jaune)}</span>
+                            {dsT.rouge >= 5 && <span className="whitespace-nowrap">🔴{fmtTimeHMS(dsT.rouge)}</span>}
                           </span>
                         )}
                       </div>
