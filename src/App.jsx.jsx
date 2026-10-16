@@ -718,7 +718,7 @@ function localLapRows(num) {
   return carLaps(normalizeCarNumber(num))
     .slice()
     .reverse()
-    .map((h) => ({ n: null, end: h.end, total: h.lt, s1: h.s ? h.s[0] : null, s2: h.s ? h.s[1] : null, s3: h.s ? h.s[2] : null }));
+    .map((h) => ({ n: h.n ?? null, at: h.end, end: h.end, total: h.lt, s1: h.s ? h.s[0] : null, s2: h.s ? h.s[1] : null, s3: h.s ? h.s[2] : null }));
 }
 function DriverLapsTable({ rows }) {
   const b = lapBests(rows);
@@ -733,7 +733,7 @@ function DriverLapsTable({ rows }) {
       <table className="w-full font-mono text-[11px] text-white/85">
         <thead className="sticky top-0 bg-neutral-900 text-white/50">
           <tr>
-            <th className="px-1.5 py-0.5 text-left">Tour / heure</th>
+            <th className="px-1.5 py-0.5 text-left">Tour · heure</th>
             <th className="px-1.5 py-0.5 text-right">S1</th>
             <th className="px-1.5 py-0.5 text-right">S2</th>
             <th className="px-1.5 py-0.5 text-right">S3</th>
@@ -742,8 +742,8 @@ function DriverLapsTable({ rows }) {
         </thead>
         <tbody>
           {[...rows].reverse().map((r) => (
-            <tr key={r.n != null ? r.n : r.end} className="border-t border-white/10">
-              <td className="px-1.5 py-0.5">{r.n != null ? r.n : new Date(r.end).toLocaleTimeString("fr-BE")}</td>
+            <tr key={(r.n != null ? r.n : "") + "_" + (r.at || r.end || "")} className="border-t border-white/10">
+              <td className="px-1.5 py-0.5 whitespace-nowrap">{r.n != null ? `tr ${r.n}` : ""}{r.at ? ` · ${new Date(r.at).toLocaleTimeString("fr-BE")}` : ""}</td>
               {cell(r.s1, b.s1)}
               {cell(r.s2, b.s2)}
               {cell(r.s3, b.s3)}
@@ -1315,7 +1315,7 @@ function CarLapsDetail({ c, num }) {
         <table className="font-mono tabular-nums">
           <thead className="text-white/50" style={{ position: "sticky", top: 0, background: "#0b0f14" }}>
             <tr>
-              <th className="pr-4 text-left font-normal">Passage</th>
+              <th className="pr-4 text-left font-normal">Tour · passage</th>
               <th className="pr-4 text-right font-normal">S1</th>
               <th className="pr-4 text-right font-normal">S2</th>
               <th className="pr-4 text-right font-normal">S3</th>
@@ -1325,7 +1325,7 @@ function CarLapsDetail({ c, num }) {
           <tbody>
             {g.laps.map((h, i) => (
               <tr key={h.end + "_" + i}>
-                <td className="pr-4 text-white/70">{new Date(h.end).toLocaleTimeString("fr-BE")}</td>
+                <td className="pr-4 text-white/70 whitespace-nowrap">{h.n != null ? `tr ${h.n} · ` : ""}{new Date(h.end).toLocaleTimeString("fr-BE")}</td>
                 <td className="pr-4 text-right" style={h.s ? bl(h.s[0], b1) : undefined}>{h.s ? fmtMs(h.s[0]) : "–"}</td>
                 <td className="pr-4 text-right" style={h.s ? bl(h.s[1], b2) : undefined}>{h.s ? fmtMs(h.s[1]) : "–"}</td>
                 <td className="pr-4 text-right" style={h.s ? bl(h.s[2], b3) : undefined}>{h.s ? fmtMs(h.s[2]) : "–"}</td>
@@ -2716,6 +2716,7 @@ export default function PitBoard() {
             s1: sOk ? lc.s1 : null,
             s2: sOk ? lc.s2 : null,
             s3: sOk ? lc.s3 : null,
+            at: lc.lapEnd || Date.now(),
           });
         }
         if (nc !== cfg) {

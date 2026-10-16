@@ -209,14 +209,14 @@ export function recordLap(cfg, driverId, lap) {
   if (!driverId || !lap || !(lap.n > 0) || !(lap.total > 0)) return cfg;
   const list = cfg.laps[driverId] || [];
   if (list.some((r) => r[0] === lap.n)) return cfg;
-  const row = [lap.n, lap.total, lap.s1 ?? null, lap.s2 ?? null, lap.s3 ?? null];
+  const row = [lap.n, lap.total, lap.s1 ?? null, lap.s2 ?? null, lap.s3 ?? null, lap.at ?? null]; // 6e valeur : heure du passage de la ligne (ms)
   const next = [...list, row].slice(-MAX_LAPS_PER_DRIVER);
   return { ...cfg, laps: { ...cfg.laps, [driverId]: next } };
 }
 
-// lignes d'un pilote [{ n, total, s1, s2, s3 }] dans l'ordre des tours
+// lignes d'un pilote [{ n, total, s1, s2, s3, at }] dans l'ordre des tours (at = heure du passage, absente des anciens tours)
 export function driverLapRows(cfg, driverId) {
-  return (cfg.laps[driverId] || []).map((r) => ({ n: r[0], total: r[1], s1: r[2], s2: r[3], s3: r[4] }));
+  return (cfg.laps[driverId] || []).map((r) => ({ n: r[0], total: r[1], s1: r[2], s2: r[3], s3: r[4], at: r[5] ?? null }));
 }
 
 // meilleurs temps (ms) parmi les tours enregistrés : { total, s1, s2, s3 } (null si aucun)
@@ -241,7 +241,7 @@ const fmtLapMs = (ms) => {
 // CSV (séparateur « ; », ouvrable dans Excel) de tous les pilotes d'une voiture
 export function lapsToCsv(cfg, carNumero, nameOf) {
   const esc = (v) => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
-  const rows = [["Voiture", "Pilote", "Tour", "S1", "S2", "S3", "Temps du tour", "Meilleur total", "Meilleur S1", "Meilleur S2", "Meilleur S3"]];
+  const rows = [["Voiture", "Pilote", "Tour", "Heure", "S1", "S2", "S3", "Temps du tour", "Meilleur total", "Meilleur S1", "Meilleur S2", "Meilleur S3"]];
   cfg.list.forEach((d) => {
     const lr = driverLapRows(cfg, d.id);
     const b = lapBests(lr);
@@ -250,6 +250,7 @@ export function lapsToCsv(cfg, carNumero, nameOf) {
         carNumero,
         nameOf(d),
         r.n,
+        r.at ? new Date(r.at).toLocaleTimeString("fr-BE") : "",
         fmtLapMs(r.s1),
         fmtLapMs(r.s2),
         fmtLapMs(r.s3),

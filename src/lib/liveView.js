@@ -142,7 +142,7 @@ export function updatePace(cars, store = paceStore, hist = lapStore, nowMs = Dat
     if (c.lapEnd != null) {
       const h = hist[num] || (hist[num] = []);
       const sOk = c.s1 != null && c.s2 != null && c.s3 != null && Math.abs(c.s1 + c.s2 + c.s3 - c.last) <= 0.03 * c.last;
-      h.push({ end: c.lapEnd, lt: c.last, s: sOk ? [c.s1, c.s2, c.s3] : null, d: c.driver || null });
+      h.push({ end: c.lapEnd, lt: c.last, s: sOk ? [c.s1, c.s2, c.s3] : null, d: c.driver || null, n: c.laps });
       if (h.length > 500) h.shift();
     }
   }
