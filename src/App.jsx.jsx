@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { supabase } from "./lib/supabase";
 import { fetchLiveTiming, parseLiveTiming, normalizeCarNumber, normalizeTrackState } from "./lib/risLive";
 import { RIS_ORIGIN, buildBookmarklet, readRisMessage } from "./lib/risBridge";
+import { fetchWeather, geocode, buildBulletin, weatherLabel, lonLatToWorld, worldToLonLat, TILE } from "./lib/weather";
 import {
   MAX_DRIVERS,
   MIN_DRIVERS,
@@ -27,7 +28,7 @@ import {
   lapBests,
   lapsToCsv,
 } from "./lib/drivers";
-import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, fcyFromRc, trackAlertRows, aroundOnTrack, pitOutCars, carLaps, classPositions, pitExitInfo, saveLiveMemory, loadLiveMemory } from "./lib/liveView";
+import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, fcyFromRc, trackAlertRows, aroundOnTrack, pitOutCars, carLaps, classPositions, pitExitInfo, saveLiveMemory, loadLiveMemory, setLiveTemperature, getLiveTemperature } from "./lib/liveView";
 import {
   Flag,
   Plus,
@@ -718,7 +719,7 @@ function localLapRows(num) {
   return carLaps(normalizeCarNumber(num))
     .slice()
     .reverse()
-    .map((h) => ({ n: h.n ?? null, at: h.end, end: h.end, total: h.lt, s1: h.s ? h.s[0] : null, s2: h.s ? h.s[1] : null, s3: h.s ? h.s[2] : null }));
+    .map((h) => ({ n: h.n ?? null, temp: h.tp ?? null, at: h.end, end: h.end, total: h.lt, s1: h.s ? h.s[0] : null, s2: h.s ? h.s[1] : null, s3: h.s ? h.s[2] : null }));
 }
 function DriverLapsTable({ rows }) {
   const b = lapBests(rows);
@@ -738,6 +739,7 @@ function DriverLapsTable({ rows }) {
             <th className="px-1.5 py-0.5 text-right">S2</th>
             <th className="px-1.5 py-0.5 text-right">S3</th>
             <th className="px-1.5 py-0.5 text-right">Total</th>
+            <th className="px-1.5 py-0.5 text-right" title="Température extérieure au moment du tour">°C</th>
           </tr>
         </thead>
         <tbody>
@@ -748,6 +750,7 @@ function DriverLapsTable({ rows }) {
               {cell(r.s2, b.s2)}
               {cell(r.s3, b.s3)}
               {cell(r.total, b.total)}
+              <td className="px-1.5 py-0.5 text-right text-white/60">{r.temp != null ? r.temp.toFixed(1) : "–"}</td>
             </tr>
           ))}
         </tbody>
@@ -819,6 +822,137 @@ function DriversTimes({ ds, hasLive, carNum }) {
           ⬇ Exporter les tours (CSV)
         </button>
       )}
+    </div>
+  );
+}
+
+// carte simple (tuiles OpenStreetMap) : glisser pour déplacer, + / − pour zoomer, cliquer pour poser le repère du circuit
+function CircuitMap({ lat, lon, onPick }) {
+  const box = useRef(null);
+  const [size, setSize] = useState({ w: 600, h: 300 });
+  const [view, setView] = useState(() => ({ lat: Number.isFinite(lat) ? lat : 50.5, lon: Number.isFinite(lon) ? lon : 4.5, z: Number.isFinite(lat) ? 14 : 7 }));
+  const drag = useRef(null);
+  useLayoutEffect(() => {
+    const measure = () => box.current && setSize({ w: box.current.offsetWidth || 600, h: 300 });
+    measure();
+    window.addEventListener("resize", measure);
+    return () => window.removeEventListener("resize", measure);
+  }, []);
+  // nouveau lieu choisi ailleurs (recherche par nom) : on recentre la carte
+  useEffect(() => {
+    if (Number.isFinite(lat) && Number.isFinite(lon)) setView((v) => ({ ...v, lat, lon, z: Math.max(v.z, 13) }));
+  }, [lat, lon]);
+  const c = lonLatToWorld(view.lon, view.lat, view.z);
+  const tlx = c.x - size.w / 2;
+  const tly = c.y - size.h / 2;
+  const n = Math.pow(2, view.z);
+  const tiles = [];
+  for (let ty = Math.floor(tly / TILE); ty <= Math.floor((tly + size.h) / TILE); ty++) {
+    for (let tx = Math.floor(tlx / TILE); tx <= Math.floor((tlx + size.w) / TILE); tx++) {
+      if (ty < 0 || ty >= n) continue;
+      const wx = ((tx % n) + n) % n;
+      tiles.push(
+        <img key={view.z + "_" + tx + "_" + ty} alt="" draggable={false} src={`https://tile.openstreetmap.org/${view.z}/${wx}/${ty}.png`} style={{ position: "absolute", left: Math.round(tx * TILE - tlx), top: Math.round(ty * TILE - tly), width: TILE, height: TILE, userSelect: "none", pointerEvents: "none" }} />
+      );
+    }
+  }
+  const pin = Number.isFinite(lat) && Number.isFinite(lon) ? lonLatToWorld(lon, lat, view.z) : null;
+  const down = (e) => {
+    drag.current = { x: e.clientX, y: e.clientY, cx: c.x, cy: c.y, moved: false };
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      /* non pris en charge */
+    }
+  };
+  const move = (e) => {
+    const d = drag.current;
+    if (!d) return;
+    const dx = e.clientX - d.x;
+    const dy = e.clientY - d.y;
+    if (Math.abs(dx) + Math.abs(dy) > 4) d.moved = true;
+    if (d.moved) {
+      const p = worldToLonLat(d.cx - dx, d.cy - dy, view.z);
+      setView((v) => ({ ...v, lat: p.lat, lon: p.lon }));
+    }
+  };
+  const up = (e) => {
+    const d = drag.current;
+    drag.current = null;
+    if (!d || d.moved) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    const p = worldToLonLat(tlx + (e.clientX - r.left), tly + (e.clientY - r.top), view.z);
+    onPick(Math.round(p.lat * 1e5) / 1e5, Math.round(p.lon * 1e5) / 1e5);
+  };
+  const zbtn = "w-8 h-8 rounded bg-white text-black font-black text-lg shadow";
+  return (
+    <div ref={box} className="relative w-full overflow-hidden rounded border border-white/30 bg-neutral-700 select-none" style={{ height: 300, touchAction: "none", cursor: "crosshair" }} onPointerDown={down} onPointerMove={move} onPointerUp={up}>
+      {tiles}
+      {pin && <div style={{ position: "absolute", left: pin.x - tlx, top: pin.y - tly, transform: "translate(-50%,-100%)", fontSize: 28, lineHeight: 1, pointerEvents: "none" }}>📍</div>}
+      <div className="absolute top-2 right-2 flex flex-col gap-1" onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()}>
+        <button type="button" className={zbtn} onClick={() => setView((v) => ({ ...v, z: Math.min(18, v.z + 1) }))}>+</button>
+        <button type="button" className={zbtn} onClick={() => setView((v) => ({ ...v, z: Math.max(3, v.z - 1) }))}>−</button>
+      </div>
+      <div className="absolute bottom-0 right-0 bg-white/80 text-black text-[10px] px-1">© OpenStreetMap</div>
+    </div>
+  );
+}
+
+// réglages météo (circuit : recherche par nom, carte, coordonnées) — dans la configuration
+function WeatherSettings({ settings, pushSettings, weather }) {
+  const [q, setQ] = useState("");
+  const [res, setRes] = useState([]);
+  const [msg, setMsg] = useState("");
+  const set = (lat, lon) => pushSettings({ ...settings, circuitLat: lat, circuitLon: lon });
+  const search = async () => {
+    setMsg("Recherche…");
+    try {
+      const r = await geocode(q);
+      setRes(r);
+      setMsg(r.length ? "" : "Aucun résultat : essayez le nom de la ville, ou cliquez sur la carte.");
+    } catch {
+      setMsg("Recherche impossible pour le moment : cliquez sur la carte.");
+    }
+  };
+  const inp = "px-2 py-1.5 text-sm rounded bg-black/50 text-white border border-white/20 focus:outline-none focus:border-white";
+  return (
+    <div className="flex flex-col gap-2 p-2 rounded border border-white/15 bg-black/30">
+      <div className="text-white text-xs font-bold uppercase tracking-wide">Météo du circuit</div>
+      <p className="text-white/50 text-[10px]">
+        Choisis l'emplacement du circuit : la température est notée avec chaque tour et un bulletin météo (maintenant + 2 heures suivantes) s'affiche toutes les 30 minutes (à H:00 et H:30).
+      </p>
+      <div className="flex gap-1.5">
+        <input type="text" value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === "Enter" && search()} placeholder="Nom du circuit ou de la ville (ex. Spa-Francorchamps)" className={inp + " flex-1 min-w-0"} />
+        <button type="button" onClick={search} className="px-3 rounded bg-white/15 text-white text-xs font-black">Chercher</button>
+      </div>
+      {msg && <div className="text-white/60 text-xs">{msg}</div>}
+      {res.length > 0 && (
+        <div className="flex flex-col gap-1">
+          {res.map((r, i) => (
+            <button key={i} type="button" onClick={() => { set(Math.round(r.lat * 1e5) / 1e5, Math.round(r.lon * 1e5) / 1e5); setRes([]); }} className="text-left text-xs rounded bg-white/10 hover:bg-white/20 px-2 py-1 text-white">
+              {r.name} <span className="text-white/50">· {r.place}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      <CircuitMap lat={settings.circuitLat} lon={settings.circuitLon} onPick={set} />
+      <div className="grid grid-cols-2 gap-2">
+        <label className="flex flex-col gap-1 text-white text-xs">
+          Latitude
+          <input type="number" step="0.00001" value={Number.isFinite(settings.circuitLat) ? settings.circuitLat : ""} onChange={(e) => pushSettings({ ...settings, circuitLat: e.target.value === "" ? null : Number(e.target.value) })} className={inp} />
+        </label>
+        <label className="flex flex-col gap-1 text-white text-xs">
+          Longitude
+          <input type="number" step="0.00001" value={Number.isFinite(settings.circuitLon) ? settings.circuitLon : ""} onChange={(e) => pushSettings({ ...settings, circuitLon: e.target.value === "" ? null : Number(e.target.value) })} className={inp} />
+        </label>
+      </div>
+      <label className="flex items-center gap-2 text-white text-xs">
+        <input type="checkbox" checked={settings.weatherBulletin !== false} onChange={(e) => pushSettings({ ...settings, weatherBulletin: e.target.checked })} />
+        Bulletin météo toutes les 30 minutes (dans les messages d'alerte)
+      </label>
+      <div className="text-white/70 text-xs">
+        {weather ? <>Actuellement : <b className="text-white">{weather.tempC.toFixed(1)} °C</b>{weather.windKmh != null ? ` · vent ${Math.round(weather.windKmh)} km/h` : ""} · {weatherLabel(weather.code).icon} {weatherLabel(weather.code).text}</> : Number.isFinite(settings.circuitLat) && Number.isFinite(settings.circuitLon) ? "Lecture de la météo…" : "Aucun emplacement choisi : pas de météo."}
+      </div>
     </div>
   );
 }
@@ -1319,7 +1453,8 @@ function CarLapsDetail({ c, num }) {
               <th className="pr-4 text-right font-normal">S1</th>
               <th className="pr-4 text-right font-normal">S2</th>
               <th className="pr-4 text-right font-normal">S3</th>
-              <th className="text-right font-normal">Tour</th>
+              <th className="pr-4 text-right font-normal">Tour</th>
+              <th className="text-right font-normal" title="Température extérieure">°C</th>
             </tr>
           </thead>
           <tbody>
@@ -1329,7 +1464,8 @@ function CarLapsDetail({ c, num }) {
                 <td className="pr-4 text-right" style={h.s ? bl(h.s[0], b1) : undefined}>{h.s ? fmtMs(h.s[0]) : "–"}</td>
                 <td className="pr-4 text-right" style={h.s ? bl(h.s[1], b2) : undefined}>{h.s ? fmtMs(h.s[1]) : "–"}</td>
                 <td className="pr-4 text-right" style={h.s ? bl(h.s[2], b3) : undefined}>{h.s ? fmtMs(h.s[2]) : "–"}</td>
-                <td className="text-right" style={bl(h.lt, bt)}>{fmtMs(h.lt)}</td>
+                <td className="pr-4 text-right" style={bl(h.lt, bt)}>{fmtMs(h.lt)}</td>
+                <td className="text-right text-white/60">{h.tp != null ? h.tp.toFixed(1) : "–"}</td>
               </tr>
             ))}
           </tbody>
@@ -2052,6 +2188,9 @@ export default function PitBoard() {
     idleConsoLh: 3, // consommation au ralenti (L/h) pendant que la voiture est à l'arrêt au stand (0 km/h)
     circuitName: "",
     circuitLengthKm: 0,
+    circuitLat: null, // emplacement du circuit (météo)
+    circuitLon: null,
+    weatherBulletin: true, // bulletin météo toutes les 30 min
     liveEnabled: false, // flux RIS Live Timing (classement, tours) relayé par un poste Admin
     liveUuid: "", // uuid du flux RIS (change à chaque événement)
     liveSource: "direct", // "direct" : le poste Admin lit le flux ; "page" : il le reçoit de la page RIS ouverte (favori)
@@ -2184,6 +2323,54 @@ export default function PitBoard() {
       remainingMs: liveRow.remainingMs == null ? null : liveRow.remainingMs,
     };
   }, [settings.liveEnabled, settings.liveUuid, settings.liveSource, liveRow, now]);
+
+  // météo du circuit : lue toutes les 10 minutes par chaque écran ; la température est notée avec chaque tour
+  const [weather, setWeather] = useState(null);
+  const [bulletin, setBulletin] = useState(null); // { w, until } : bulletin affiché à H:00 et H:30
+  const wxLat = Number.isFinite(settings.circuitLat) ? settings.circuitLat : null;
+  const wxLon = Number.isFinite(settings.circuitLon) ? settings.circuitLon : null;
+  const wxOn = wxLat != null && wxLon != null;
+  useEffect(() => {
+    if (!wxOn) {
+      setWeather(null);
+      setLiveTemperature(null);
+      return undefined;
+    }
+    let stop = false;
+    const load = () =>
+      fetchWeather(wxLat, wxLon)
+        .then((w) => {
+          if (stop || !w) return;
+          setWeather(w);
+          setLiveTemperature(w.tempC);
+        })
+        .catch(() => {});
+    load();
+    const t = setInterval(load, 10 * 60000);
+    return () => {
+      stop = true;
+      clearInterval(t);
+    };
+  }, [wxOn, wxLat, wxLon]);
+  const wxSlot = Math.floor(now / 1800000);
+  const wxSlotRef = useRef(null);
+  useEffect(() => {
+    if (!wxOn || settings.weatherBulletin === false) return;
+    if (wxSlotRef.current === null) {
+      wxSlotRef.current = wxSlot; // pas de bulletin à l'ouverture de la page : le prochain tombe à H:00 ou H:30
+      return;
+    }
+    if (wxSlotRef.current === wxSlot) return;
+    wxSlotRef.current = wxSlot;
+    fetchWeather(wxLat, wxLon)
+      .then((w) => {
+        if (!w) return;
+        setWeather(w);
+        setLiveTemperature(w.tempC);
+        setBulletin({ w, until: Date.now() + 150000 });
+      })
+      .catch(() => {});
+  }, [wxSlot, wxOn, wxLat, wxLon, settings.weatherBulletin]);
 
   // mémoire de l'écran (rythmes, tours vus, sorties des stands) conservée dans le navigateur : un F5 ne la perd plus
   const memKey = "pitboard_livemem_" + ((settings.liveUuid || "").trim() || "x");
@@ -2750,6 +2937,7 @@ export default function PitBoard() {
             s2: sOk ? lc.s2 : null,
             s3: sOk ? lc.s3 : null,
             at: lc.lapEnd || Date.now(),
+            temp: getLiveTemperature(),
           });
         }
         if (nc !== cfg) {
@@ -4003,6 +4191,29 @@ export default function PitBoard() {
   }
 
   // bandeau rouge de la direction de course (RC), sur toute la largeur
+  // bulletin météo (toutes les 30 min) : maintenant + prévisions des 2 heures suivantes
+  const wxData = bulletin && now < bulletin.until ? buildBulletin(bulletin.w, now) : null;
+  const wxBanner = wxData ? (
+    <div className="mb-3 w-full rounded-xl px-4 py-3 flex items-start gap-3 shadow-lg" style={{ backgroundColor: wxData.rain ? "#7a3b00" : "#0b4a8f", border: `3px solid ${wxData.rain ? "#ffb020" : "#5cc8ff"}` }}>
+      <div className="flex-1 min-w-0 text-white">
+        <div className="text-white/80 text-[11px] font-bold uppercase tracking-widest">Bulletin météo · mis à jour à {fmtClock(now).slice(0, 5)}</div>
+        <div className="text-xl sm:text-2xl font-black leading-snug">
+          {wxData.now.text} · {wxData.now.temp.toFixed(1)} °C{wxData.now.wind != null ? ` · vent ${Math.round(wxData.now.wind)} km/h` : ""}
+        </div>
+        <div className="text-base sm:text-lg font-bold">{wxData.summary}</div>
+        <div className="flex flex-wrap gap-x-5 gap-y-0.5 font-mono text-sm sm:text-base">
+          {wxData.lines.map((l) => (
+            <span key={l.time} style={l.wet ? { color: "#ffd27a", fontWeight: 800 } : undefined}>
+              {l.time} · {l.temp != null ? l.temp.toFixed(0) + " °C" : "–"} · {l.text}{l.rain ? ` · ${l.rain}` : ""}
+            </span>
+          ))}
+        </div>
+      </div>
+      <button onClick={() => setBulletin(null)} className="text-white/80 hover:text-white flex-shrink-0" title="Masquer le bulletin">
+        <X size={20} />
+      </button>
+    </div>
+  ) : null;
   const rcBanner =
     rcMessages.length > 0 ? (
       <div className="mb-3 flex flex-col gap-2 w-full">
@@ -4081,6 +4292,11 @@ export default function PitBoard() {
             <Clock size={15} className="text-white/70" />
             {fmtClock(now)}
           </div>
+          {weather && (
+            <div className="flex items-center gap-1 text-white font-mono font-bold text-sm" title={`Température au circuit · ${weatherLabel(weather.code).text}`}>
+              🌡 {weather.tempC.toFixed(1)}°C
+            </div>
+          )}
 
           {(() => {
             const evt = getEventStatus(settings, now);
@@ -4463,6 +4679,7 @@ export default function PitBoard() {
                   />
                 </label>
               </div>
+              <WeatherSettings settings={settings} pushSettings={pushSettings} weather={weather} />
               {/* CHRONOMÉTRAGE LIVE (RIS) */}
               <div className="flex flex-col gap-2 p-2 rounded border border-white/15 bg-black/30">
                 <div className="text-white text-xs font-bold uppercase tracking-wide">
@@ -4838,7 +5055,7 @@ export default function PitBoard() {
         )}
 
         {/* DIRECTION DE COURSE (RC) : grand, en rouge, sur toute la largeur (team manager : juste sous la jauge, voir plus bas) */}
-        {!myCar && rcBanner}
+        {!myCar && <>{wxBanner}{rcBanner}</>}
 
         {/* GRILLE DE DÉPART */}
         <div className="mb-4">
@@ -5468,7 +5685,7 @@ export default function PitBoard() {
                   return (
                     <FitToScreen>
                     {topBar}
-                    {(fuelBanner || rcBanner) && <div className="mt-2 flex flex-col gap-2">{fuelBanner}{rcBanner}</div>}
+                    {(fuelBanner || wxBanner || rcBanner) && <div className="mt-2 flex flex-col gap-2">{fuelBanner}{wxBanner}{rcBanner}</div>}
                     <div className="w-full grid gap-2 items-start rounded-2xl bg-black/65 p-2 grid-cols-1 lg:grid-cols-[58%_minmax(0,1fr)] xl:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)]">
                       <div className="w-full order-2 lg:order-1">
                         <div className="flex justify-end mb-1">
