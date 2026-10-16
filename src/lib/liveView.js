@@ -151,14 +151,16 @@ export function updatePace(cars, store = paceStore, hist = lapStore, nowMs = Dat
 const lapStore = {};
 const outStore = {}; // { num: { off, out, at (heure de la dernière sortie des stands), seen } }
 
-// temps moyen sur les 10 derniers tours, en écartant les tours plus de 5 % plus lents que cette moyenne (stand, neutralisation, incident) : { ms, n } ou null
+// temps moyen sur les 10 derniers tours, en écartant les tours plus de 5 % plus lents que la médiane (stand, neutralisation, incident) : { ms, n } ou null
+// la médiane résiste aux tours lents : 2 tours propres suffisent pour afficher un rythme
 export function lapAverage(num, hist = lapStore) {
   const laps = (hist[num] || []).slice(-10).map((h) => h.lt).filter((v) => v > 0);
-  if (laps.length < 3) return null;
-  const m = laps.reduce((a, b) => a + b, 0) / laps.length;
-  const kept = laps.filter((v) => v <= 1.05 * m);
-  if (kept.length < 3) return null;
-  return { ms: kept.reduce((a, b) => a + b, 0) / kept.length, n: kept.length };
+  if (laps.length < 2) return null;
+  const s = [...laps].sort((x, y) => x - y);
+  const med = s.length % 2 ? s[s.length >> 1] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2;
+  const kept = laps.filter((v) => v <= 1.05 * med);
+  if (kept.length < 2) return null;
+  return { ms: kept.reduce((x, y) => x + y, 0) / kept.length, n: kept.length };
 }
 
 // voitures apparues en « out » des stands depuis sinceMs (la plus récente d'abord) : [{ num, team, pos, cat, pic, at, avgMs }]

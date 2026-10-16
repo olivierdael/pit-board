@@ -960,6 +960,17 @@ function AlertPill({ d }) {
 const fmtAvgMs = (ms) => (ms == null ? "–" : `${Math.floor(ms / 60000)}:${((ms % 60000) / 1000).toFixed(1).padStart(4, "0")}`);
 function AroundTable({ data, prio, alerts, myPos, myNum, myTeam, pilot, now, stale, nA, nB, setNA, setNB, cars }) {
   const [openNum, setOpenNum] = useState(null); // voiture dont on affiche le détail des tours (clic sur son équipe)
+  const held = useRef({});
+  // garde 10 minutes la dernière valeur connue (grisée) quand la mesure disparaît (arrêt, neutralisation…)
+  const hold = (id, v) => {
+    const h = held.current;
+    if (v != null) {
+      h[id] = { v, t: now };
+      return { v, stale: false };
+    }
+    const x = h[id];
+    return x && now - x.t < 600000 ? { v: x.v, stale: true } : { v: null, stale: false };
+  };
   const hasCls = !!data && [...data.ahead, ...data.behind].some((r) => r.cat);
   const cols = { gridTemplateColumns: hasCls ? "2.6rem 3.2rem 4.2rem 2.6rem minmax(7rem,1fr) 6.2rem 8rem 4.6rem 9rem 11rem" : "2.6rem 3.2rem minmax(7rem,1fr) 6.2rem 8rem 4.6rem 9rem 11rem" };
   const fmtAvg = (ms) => (ms == null ? "–" : `${Math.floor(ms / 60000)}:${((ms % 60000) / 1000).toFixed(1).padStart(4, "0")}`);
@@ -970,17 +981,22 @@ function AroundTable({ data, prio, alerts, myPos, myNum, myTeam, pilot, now, sta
     const d = (prio || []).find((x) => x.num === n);
     return d ? fmtCountdown(d.remainingMs) : "";
   };
+  const gray = { opacity: 0.55, fontStyle: "italic" };
   const trend = (r, tinted) => {
-    if (r.trendMs == null) return <span className={tinted ? "" : "text-white/40"}>–</span>;
-    if (r.trendMs < -300) return <span style={tinted ? undefined : { color: "#38bdf8" }}>↘ se rapproche {fmtGapMs(-r.trendMs)}</span>;
-    if (r.trendMs > 300) return <span className={tinted ? "" : "text-white/60"}>↗ s'éloigne {fmtGapMs(r.trendMs)}</span>;
-    return <span className={tinted ? "" : "text-white/60"}>= stable</span>;
+    const { v, stale } = hold(r.num + "t", r.trendMs);
+    if (v == null) return <span className={tinted ? "" : "text-white/40"}>–</span>;
+    const st = stale ? gray : {};
+    if (v < -300) return <span style={{ ...(tinted ? {} : { color: "#38bdf8" }), ...st }}>↘ se rapproche {fmtGapMs(-v)}</span>;
+    if (v > 300) return <span className={tinted ? "" : "text-white/60"} style={st}>↗ s'éloigne {fmtGapMs(v)}</span>;
+    return <span className={tinted ? "" : "text-white/60"} style={st}>= stable</span>;
   };
   const pace = (r, tinted) => {
-    if (r.deltaMs == null) return <span className={tinted ? "" : "text-white/40"}>–</span>;
-    const d = r.deltaMs / 1000;
-    if (Math.abs(d) < 0.05) return <span>= même rythme</span>;
-    return d < 0 ? <span style={tinted ? undefined : { color: "#f87171" }}>{Math.abs(d).toFixed(1)} s/tr plus vite</span> : <span style={tinted ? undefined : { color: "#4ade80" }}>{d.toFixed(1)} s/tr plus lent</span>;
+    const { v, stale } = hold(r.num + "d", r.deltaMs);
+    if (v == null) return <span className={tinted ? "" : "text-white/40"}>–</span>;
+    const st = stale ? gray : {};
+    const d = v / 1000;
+    if (Math.abs(d) < 0.05) return <span style={st}>= même rythme</span>;
+    return d < 0 ? <span style={{ ...(tinted ? {} : { color: "#f87171" }), ...st }}>{Math.abs(d).toFixed(1)} s/tr plus vite</span> : <span style={{ ...(tinted ? {} : { color: "#4ade80" }), ...st }}>{d.toFixed(1)} s/tr plus lent</span>;
   };
   // devant nous sur la piste mais derrière au général = vert fluo ; derrière nous sur la piste mais devant au général = rouge
   const tint = (r, key) => (myPos == null ? null : key === "a" && r.pos > myPos ? "green" : key === "b" && r.pos < myPos ? "red" : null);
@@ -1390,7 +1406,7 @@ function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow })
   const hl = (v, b, onMe) => (isBest(v, b) ? { color: onMe ? "#0033cc" : BLUE, fontWeight: 800 } : undefined);
   const colList = [[inWindow ? "2.4rem" : "2rem", cat ? "PIC" : "Pos"], [inWindow ? "minmax(6rem,1fr)" : "minmax(1.5rem,1fr)", "Voiture"]];
   colList.push([inWindow ? "3rem" : "1.7rem", "Tours"]);
-  colList.push([inWindow ? "4.2rem" : "3.6rem", "Tour"], [inWindow ? "3rem" : "2.3rem", "S1"], [inWindow ? "3rem" : "2.3rem", "S2"], [inWindow ? "3rem" : "2.3rem", "S3"], [inWindow ? "5.2rem" : "3.4rem", "Écart"], [inWindow ? "3.4rem" : "2.5rem", "Gain"], [inWindow ? "4.4rem" : "3rem", "Σ tour"], [inWindow ? "4.6rem" : "3.2rem", "Sortie stand"], [inWindow ? "4.6rem" : "3.2rem", "Retour est."]);
+  colList.push([inWindow ? "4.2rem" : "3.6rem", "Tour"], [inWindow ? "3rem" : "2.3rem", "S1"], [inWindow ? "3rem" : "2.3rem", "S2"], [inWindow ? "3rem" : "2.3rem", "S3"], [inWindow ? "5.2rem" : "3.4rem", "Écart"], [inWindow ? "3.4rem" : "2.5rem", "Gain"], [inWindow ? "4.4rem" : "3rem", "Σ tour"], [inWindow ? "6rem" : "4.6rem", "Sortie stand"]);
   const cols = { gridTemplateColumns: colList.map((c) => c[0]).join(" ") };
   const rowCls = `grid items-center gap-x-1.5 font-mono whitespace-nowrap ${tcls}`;
   const gapCell = (r, isAhead) => {
@@ -1405,11 +1421,23 @@ function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow })
     if (me.gl != null && c.gl != null) return fmtGapMs(Math.max(0, isAhead ? me.gl - c.gl : c.gl - me.gl));
     return "–";
   };
+  const held = useRef({});
+  const hold = (id, v) => {
+    const h = held.current;
+    if (v != null) {
+      h[id] = { v, t: now };
+      return { v, stale: false };
+    }
+    const x = h[id];
+    return x && now - x.t < 600000 ? { v: x.v, stale: true } : { v: null, stale: false };
+  };
   const gainCell = (r, key = "gainMs") => {
-    if (r[key] == null) return <span className="text-white/30">–</span>;
-    const g = r[key] / 1000;
-    if (Math.abs(g) < 0.05) return <span className="rounded px-1 bg-white/20 text-white font-black">0.0</span>;
-    return g > 0 ? <span className="rounded px-1 bg-green-600 text-white font-black">+{g.toFixed(1)}</span> : <span className="rounded px-1 bg-red-600 text-white font-black">−{Math.abs(g).toFixed(1)}</span>;
+    const { v, stale } = hold(r.num + key, r[key]);
+    if (v == null) return <span className="text-white/30">–</span>;
+    const g = v / 1000;
+    const sty = stale ? { opacity: 0.5, fontStyle: "italic" } : undefined;
+    if (Math.abs(g) < 0.05) return <span className="rounded px-1 bg-white/20 text-white font-black" style={sty}>0.0</span>;
+    return g > 0 ? <span className="rounded px-1 bg-green-600 text-white font-black" style={sty}>+{g.toFixed(1)}</span> : <span className="rounded px-1 bg-red-600 text-white font-black" style={sty}>−{Math.abs(g).toFixed(1)}</span>;
   };
   const line = (r, isAhead, isMe) => {
     const c = isMe ? me : cars[r.num] || {};
@@ -1430,23 +1458,14 @@ function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow })
         <span className="text-right">{isMe ? "" : <>{isAhead ? "▲ " : "▼ "}{gapCell(r, isAhead)}</>}</span>
         <span className="text-right">{isMe ? "" : gainCell(r)}</span>
         <span className="text-right border-l-2 border-white/50 pl-1.5">{isMe ? "" : gainCell(r, "lapGainMs")}</span>
-        {(() => {
-          const pi = pitExitInfo(isMe ? num : r.num);
-          const hm = (t) => new Date(t).toLocaleTimeString("fr-BE", { hour: "2-digit", minute: "2-digit" });
-          const soon = pi && pi.estIn != null && pi.estIn - now < 10 * 60000;
-          return (
-            <>
-              <span className="text-right border-l-2 border-white/50 pl-1.5" title="Heure de la dernière sortie des stands vue par cet écran">{pi ? hm(pi.at) : <span className="text-white/30">–</span>}</span>
-              <span
-                className="text-right"
-                style={soon ? { color: "#ffb020", fontWeight: 800 } : undefined}
-                title={pi && pi.estIn != null ? (pi.basis === "car" ? "Retour estimé = sortie + durée moyenne de ses relais déjà vus" : "Retour estimé = sortie + durée médiane des relais des autres voitures") : "Estimation impossible : aucun relais terminé vu pour l'instant"}
-              >
-                {pi && pi.estIn != null ? <>{hm(pi.estIn)}{pi.basis === "field" ? "~" : ""}</> : pi && pi.inPit ? <span className="text-white/40 font-sans">stand</span> : <span className="text-white/30">–</span>}
-              </span>
-            </>
-          );
-        })()}
+        <span className="text-right border-l-2 border-white/50 pl-1.5" title="Temps écoulé depuis la dernière sortie des stands (chronomètre)">
+          {(() => {
+            const pi = pitExitInfo(isMe ? num : r.num);
+            if (!pi) return <span className="text-white/30">–</span>;
+            if (pi.inPit) return <span className="text-white/40 font-sans">au stand</span>;
+            return fmtTimeHMS(Math.max(0, Math.round((now - pi.at) / 1000)));
+          })()}
+        </span>
       </div>
       {openNum === id && <CarLapsDetail c={c} num={id} cols={cols} />}
       </React.Fragment>
@@ -1477,7 +1496,7 @@ function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow })
       </div>
       <div className={`${rowCls} px-1 text-white/60 uppercase`} style={cols}>
         {colList.map((c, i) => (
-          <span key={i} className={c[1] === "Écart" || c[1] === "Gain" || c[1] === "Retour est." ? "text-right" : c[1] === "Σ tour" || c[1] === "Sortie stand" ? "text-right border-l-2 border-white/50 pl-1.5" : ""} title={c[1] === "Σ tour" ? "Gain ou perte cumulé S1 + S2 + S3 sur le tour en cours (tour complet une fois la ligne franchie)" : c[1] === "Sortie stand" ? "Heure de la dernière sortie des stands" : c[1] === "Retour est." ? "Heure estimée du prochain passage aux stands (sortie + durée de relais)" : undefined}>{c[1]}</span>
+          <span key={i} className={c[1] === "Écart" || c[1] === "Gain" ? "text-right" : c[1] === "Σ tour" || c[1] === "Sortie stand" ? "text-right border-l-2 border-white/50 pl-1.5" : ""} title={c[1] === "Σ tour" ? "Gain ou perte cumulé S1 + S2 + S3 sur le tour en cours (tour complet une fois la ligne franchie)" : c[1] === "Sortie stand" ? "Chronomètre : temps écoulé depuis la dernière sortie des stands" : undefined}>{c[1]}</span>
         ))}
       </div>
       {ahead.map((r) => line(r, true, false))}
@@ -1485,7 +1504,7 @@ function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow })
       {behind.map((r) => line(r, false, false))}
       {inWindow && (
         <div className="text-white/50 font-sans text-xs pt-1">
-          Écart mesuré à chaque point (S1, S2, L = ligne) franchi par la voiture et par nous. Gain : temps pris (vert +) ou perdu (rouge −) sur la voiture dans le dernier tronçon. Σ tour : cumul S1 + S2 + S3 en direct, donc le total sur le tour complet une fois la ligne franchie. Sortie stand : heure de la dernière sortie des stands. Retour est. : heure estimée du prochain arrêt (sortie + durée moyenne de ses relais vus ; ~ = médiane des autres voitures) ; orange si moins de 10 min.
+          Écart mesuré à chaque point (S1, S2, L = ligne) franchi par la voiture et par nous. Gain : temps pris (vert +) ou perdu (rouge −) sur la voiture dans le dernier tronçon. Σ tour : cumul S1 + S2 + S3 en direct, donc le total sur le tour complet une fois la ligne franchie. Sortie stand : chronomètre depuis la dernière sortie des stands (le relais en cours de la voiture).
         </div>
       )}
     </div>
