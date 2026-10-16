@@ -5381,6 +5381,33 @@ export default function PitBoard() {
                   const lapsLeft = fuelM && fuelM.calibrated && settings.circuitLengthKm > 0 && fuelM.autonomyKm ? fuelM.autonomyKm / settings.circuitLengthKm : null;
                   const dsT = dsM && dsM.curDriver ? dsM.totals[dsM.curDriver.id] : null;
                   const essaisM = settings.eventType !== "course";
+                  // seuils d'essence : message clignotant dans la ligne rouge sous la jauge (alerte, puis PIT IN urgent)
+                  const fuelBanner = fuelM && fuelM.calibrated && fuelM.status !== "OK" ? (
+                    <div
+                      key="fuelalert"
+                      className="rounded-xl px-4 py-3 flex items-center gap-3 shadow-lg"
+                      style={{
+                        backgroundColor: "#c40000",
+                        border: "3px solid #ff4040",
+                        animation: `pbblink ${fuelM.status === "CRITICAL" ? "0.5s" : "1.4s"} infinite`,
+                      }}
+                      role="alert"
+                    >
+                      <AlertTriangle size={30} className="flex-shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[11px] font-bold uppercase tracking-widest opacity-80">
+                          {fuelM.status === "CRITICAL" ? "Seuil critique d'essence atteint" : "Seuil d'alerte d'essence atteint"}
+                        </div>
+                        <div className="text-2xl sm:text-3xl font-black leading-snug">
+                          {fuelM.status === "CRITICAL" ? "🛑 URGENT — PIT IN ! PIT IN !" : "⚠ ESSENCE BASSE — préparer le pit in"}
+                          <span className="ml-3 font-mono text-lg sm:text-xl">
+                            {fuelM.fuelRemaining.toFixed(1)} L · {fuelM.pct.toFixed(0)} %
+                            {lapsLeft != null ? ` · ≈ ${lapsLeft.toFixed(1)} tr` : ""}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null;
                   const topBar = (
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-2">
                       {essaisM ? (
@@ -5441,7 +5468,7 @@ export default function PitBoard() {
                   return (
                     <FitToScreen>
                     {topBar}
-                    {rcBanner && <div className="mt-2">{rcBanner}</div>}
+                    {(fuelBanner || rcBanner) && <div className="mt-2 flex flex-col gap-2">{fuelBanner}{rcBanner}</div>}
                     <div className="w-full grid gap-2 items-start rounded-2xl bg-black/65 p-2 grid-cols-1 lg:grid-cols-[58%_minmax(0,1fr)] xl:grid-cols-[minmax(0,1fr)_minmax(0,1.6fr)]">
                       <div className="w-full order-2 lg:order-1">
                         <div className="flex justify-end mb-1">
