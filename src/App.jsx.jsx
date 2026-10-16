@@ -771,7 +771,7 @@ function DriversTimes({ ds, hasLive, carNum }) {
         const t = ds.totals[p.id];
         const isCur = ds.curDriver && ds.curDriver.id === p.id;
         const bst = ds.cfg.best[p.id];
-        const recorded = driverLapRows(ds.cfg, p.id);
+        const recorded = driverLapRows(ds.cfg, p.id, ds.n);
         const useLocal = recorded.length === 0 && isCur;
         const rows = useLocal ? localLapRows(carNum) : recorded;
         const open = openId === p.id;
@@ -818,7 +818,7 @@ function DriversTimes({ ds, hasLive, carNum }) {
         <button
           type="button"
           disabled={nbLaps === 0}
-          onClick={() => downloadText(`pitboard_tours_${carNum || "voiture"}.csv`, lapsToCsv(ds.cfg, carNum || "", driverName))}
+          onClick={() => downloadText(`pitboard_tours_${carNum || "voiture"}.csv`, lapsToCsv(ds.cfg, carNum || "", driverName, ds.n))}
           className="self-start mt-1 rounded bg-white/15 hover:bg-white/25 disabled:opacity-40 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-white"
         >
           ⬇ Exporter les tours (CSV)
