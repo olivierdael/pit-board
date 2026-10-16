@@ -27,7 +27,7 @@ import {
   lapBests,
   lapsToCsv,
 } from "./lib/drivers";
-import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, fcyFromRc, trackAlertRows, aroundOnTrack, pitOutCars, carLaps, classPositions, pitExitInfo } from "./lib/liveView";
+import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, fcyFromRc, trackAlertRows, aroundOnTrack, pitOutCars, carLaps, classPositions, pitExitInfo, saveLiveMemory, loadLiveMemory } from "./lib/liveView";
 import {
   Flag,
   Plus,
@@ -2184,6 +2184,27 @@ export default function PitBoard() {
       remainingMs: liveRow.remainingMs == null ? null : liveRow.remainingMs,
     };
   }, [settings.liveEnabled, settings.liveUuid, settings.liveSource, liveRow, now]);
+
+  // mémoire de l'écran (rythmes, tours vus, sorties des stands) conservée dans le navigateur : un F5 ne la perd plus
+  const memKey = "pitboard_livemem_" + ((settings.liveUuid || "").trim() || "x");
+  const memLoadedRef = useRef("");
+  if (settings.liveUuid && memLoadedRef.current !== memKey) {
+    memLoadedRef.current = memKey;
+    loadLiveMemory(memKey);
+  }
+  useEffect(() => {
+    if (!settings.liveEnabled || !settings.liveUuid) return undefined;
+    const save = () => saveLiveMemory(memKey, (carsRef.current || []).map((c) => normalizeCarNumber(c.numero)));
+    const t = setInterval(save, 10000);
+    window.addEventListener("pagehide", save);
+    document.addEventListener("visibilitychange", save);
+    return () => {
+      clearInterval(t);
+      window.removeEventListener("pagehide", save);
+      document.removeEventListener("visibilitychange", save);
+      save();
+    };
+  }, [memKey, settings.liveEnabled, settings.liveUuid]);
 
   // enregistre les changements de drapeau annoncés par le flux (état de piste ou full course yellow du RC)
   const feedFlagLastRef = useRef(null);

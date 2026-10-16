@@ -819,3 +819,40 @@ export function fcyFromRc(rc, refMs, maxAgeMs = 30 * 60000) {
 export function carLaps(num, hist = lapStore) {
   return [...(hist[num] || [])].reverse();
 }
+
+// ---------- mémoire de l'écran conservée dans le navigateur (survit au F5) ----------
+// rythmes, tours vus et sorties des stands de cet écran : sans cela, un F5 repart de zéro (rythme, chrono depuis la sortie, tours vus)
+const MEM_MAX_AGE_MS = 36 * 3600 * 1000;
+export function saveLiveMemory(key, fullNums = [], maxFull = 300, maxOther = 30) {
+  try {
+    const laps = {};
+    Object.keys(lapStore).forEach((n) => {
+      laps[n] = lapStore[n].slice(-(fullNums.includes(n) ? maxFull : maxOther));
+    });
+    localStorage.setItem(key, JSON.stringify({ t: Date.now(), pace: paceStore, laps, outs: outStore }));
+  } catch {
+    /* stockage indisponible ou plein */
+  }
+}
+export function loadLiveMemory(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return false;
+    const m = JSON.parse(raw);
+    if (!m || !(Date.now() - m.t < MEM_MAX_AGE_MS)) return false;
+    Object.keys(m.laps || {}).forEach((n) => {
+      if (!lapStore[n] || lapStore[n].length < m.laps[n].length) lapStore[n] = m.laps[n];
+    });
+    Object.keys(m.pace || {}).forEach((n) => {
+      if (!paceStore[n] || (paceStore[n].times || []).length < (m.pace[n].times || []).length) paceStore[n] = m.pace[n];
+    });
+    Object.keys(m.outs || {}).forEach((n) => {
+      const o = m.outs[n];
+      const c = outStore[n];
+      if (!c || (o.at != null && (c.at == null || o.at > c.at)) || ((o.stints || []).length > ((c.stints || []).length))) outStore[n] = { ...o, ...(c && c.seen ? { off: c.off, out: c.out, inPit: c.inPit, seen: true } : {}) };
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
