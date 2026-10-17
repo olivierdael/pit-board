@@ -1031,7 +1031,7 @@ function DraftInput({ value, onCommit, placeholder, className, disabled }) {
 
 // Essais : encart "consommation". Le réservoir est plein au départ ; à la fin on remet du carburant et on saisit les litres :
 // consommation = litres / distance parcourue (temps de roulage vert et jaune, vitesses moyennes des réglages).
-function EssaisConsoCard({ run, tankL, lapsKm, savedValue, onSave, running, canCancel, onStart, onCancel }) {
+function EssaisConsoCard({ run, tankL, lapsKm, savedValue, onSave, running, canCancel, onStart, onCancel, auto }) {
   const [added, setAdded] = useState("");
   const [saved, setSaved] = useState(false);
   const litres = parseFloat(String(added).replace(",", "."));
@@ -1042,7 +1042,9 @@ function EssaisConsoCard({ run, tankL, lapsKm, savedValue, onSave, running, canC
     <div className="rounded-xl bg-black/80 border-2 border-[#ffd400] px-3 py-1.5 flex flex-col gap-1">
       <div className="flex items-center gap-3 flex-wrap text-white">
         <span className="text-sm font-black uppercase tracking-wide whitespace-nowrap">⛽ Essais · plein de {tankL} L au départ</span>
-        {!running ? (
+        {!running && auto ? (
+          <span className="px-3 py-1 rounded text-xs font-black uppercase bg-green-600 text-white">🏁 Départ automatique : dès que la voiture franchit S1 (RIS)</span>
+        ) : !running ? (
           <button type="button" onClick={onStart} className="px-6 py-3 rounded-lg font-black uppercase text-2xl leading-tight shadow-lg" style={{ animation: "pbblink 0.8s infinite" }}>
             🏁 Voiture sur la piste : lancer le calcul
           </button>
@@ -1545,7 +1547,7 @@ function loadClassement() {
   }
   return d;
 }
-function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow, quali }) {
+function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow, quali, teamNums }) {
   const BLUE = "#5cc8ff";
   const [openNum, setOpenNum] = useState(null); // voiture dont on affiche le détail des tours (clic sur son nom)
   const tcls = "text-[13px]"; // jamais moins de 12 px
@@ -1606,9 +1608,10 @@ function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow, q
   const line = (r, isAhead, isMe) => {
     const c = isMe ? me : cars[r.num] || {};
     const id = isMe ? num : r.num;
+    const isTeam = !isMe && Array.isArray(teamNums) && teamNums.includes(normalizeCarNumber(r.num)); // autre voiture de la team : écriture orange
     return (
       <React.Fragment key={id}>
-      <div className={`${rowCls} px-1 py-0.5 ${isMe ? "rounded font-black" : "text-white"}`} style={isMe ? { ...cols, color: "#000", backgroundColor: "#ffe600" } : cols}>
+      <div className={`${rowCls} px-1 py-0.5 ${isMe ? "rounded font-black" : isTeam ? "font-black" : "text-white"}`} style={isMe ? { ...cols, color: "#000", backgroundColor: "#ffe600" } : isTeam ? { ...cols, color: "#ff9500" } : cols}>
         <span>{cat ? (r.pic != null ? `${r.pic}e` : "") : `P${c.pos}`}</span>
         <span className="truncate font-sans cursor-pointer underline decoration-dotted underline-offset-2" title="Cliquer pour voir ses tours et ses meilleurs temps (S1, S2, S3)" onClick={() => setOpenNum(openNum === id ? null : id)}>
           #{isMe ? num : r.num} {c.team}
@@ -1733,7 +1736,7 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, pilot = "", pa
     <>
       {wins.cl && (
         <WindowHost title="Classement" storeKey="cl" wide startPos={{ x: 16, y: 72 }} onClose={closeWin("cl")}>
-          <ClassementPanel cars={info.cars} num={num} now={now} st={cl} setSt={setCl} big inWindow quali={!!info.quali} />
+          <ClassementPanel cars={info.cars} num={num} now={now} st={cl} setSt={setCl} big inWindow quali={!!info.quali} teamNums={info.teamNums} />
         </WindowHost>
       )}
       {wins.ar && (
@@ -2410,6 +2413,7 @@ export default function PitBoard() {
       relayAgeSec,
       feedFresh: feedAgeSec <= 90 && liveRow.status !== "FINISHED",
       feedAgeSec,
+      teamNums: allConfiguredCars.map((c) => normalizeCarNumber(c.numero)), // numéros des voitures de la team (affichés en orange dans le classement)
       quali: (settings.eventType || "course") !== "course", // qualification / essais : écarts de notre voiture à ses meilleurs secteurs
       status: liveRow.status || "",
       trackStateRaw: liveRow.trackStateRaw,
@@ -2418,7 +2422,7 @@ export default function PitBoard() {
       elapsedMs: liveRow.elapsedMs == null ? null : liveRow.elapsedMs,
       remainingMs: liveRow.remainingMs == null ? null : liveRow.remainingMs,
     };
-  }, [settings.liveEnabled, settings.liveUuid, settings.liveSource, settings.eventType, liveRow, now]);
+  }, [settings.liveEnabled, settings.liveUuid, settings.liveSource, settings.eventType, allConfiguredCars, liveRow, now]);
 
   // alertes RC : mémoire locale de cet écran (en plus de l'historique noté par le poste Admin), pour qu'aucune alerte ne soit ratée
   const rcLocalKey = "pitboard_rclocal_" + ((settings.liveUuid || "").trim() || "x");
@@ -3145,12 +3149,31 @@ export default function PitBoard() {
     }
 
     // entrée / sortie des stands pilotées par le flux RIS (poste Admin qui relaie) : l'état « pit » du flux déclenche l'entrée
-    // de l'annonce, le retour en piste (OUT) la sortie ; deux lectures consécutives sont exigées pour éviter un faux départ
+    // de l'annonce, le retour en piste (OUT) la sortie ; l'entrée est immédiate, la sortie exige deux lectures consécutives pour éviter un faux départ
     const pitCount = {}; // { idAnnonce: { in: n, out: n, seen: bool } }
     function autoPit(live, nowMs) {
       if (nowMs - live.generatedAt > 90000) return;
       const api = autoPitRef.current;
       if (!api) return;
+      // essais / qualification : le roulage démarre seul dès que le flux montre la voiture en piste (S1 franchi, plus aux stands)
+      if ((settingsRef.current.eventType || "course") !== "course") {
+        carsRef.current.forEach((car) => {
+          const lc = live.cars[normalizeCarNumber(car.numero)];
+          const st0 = stintsRef.current[car.id];
+          if (!lc || (st0 && (st0.lastExitAt || (st0.log || []).length > 0))) {
+            delete pitCount["run" + car.id];
+            return;
+          }
+          const onTrack = !isPitIn(lc.state) && lc.s1 != null;
+          const n = onTrack ? (pitCount["run" + car.id] || 0) + 1 : 0;
+          pitCount["run" + car.id] = n;
+          if (n >= 2) {
+            // le départ réel = passage constaté de S1 moins le temps de S1 : on ajoute ce temps au début du relais
+            api.startRun(car.id, nowMs - (lc.s1 > 0 && lc.s1 < 600000 ? lc.s1 : 0));
+            delete pitCount["run" + car.id];
+          }
+        });
+      }
       carsRef.current.forEach((car) => {
         const lc = live.cars[normalizeCarNumber(car.numero)];
         if (!lc) return;
@@ -3161,7 +3184,7 @@ export default function PitBoard() {
         st.in = inPit ? st.in + 1 : 0;
         st.out = inPit ? 0 : st.out + 1;
         if (call.phase === "countdown") {
-          if (st.in >= 2) {
+          if (st.in >= 1) {
             api.forceArrival(call.id);
             api.speakEntry(call.numero);
             st.seen = true;
@@ -3251,7 +3274,7 @@ export default function PitBoard() {
       if (!stopped) setRelayStatus({ ok: false, error: (e && e.message) || String(e), at: Date.now() });
     };
 
-    async function tick() {
+    async function tick(quiet) {
       if (busy || stopped) return;
       busy = true;
       try {
@@ -3259,7 +3282,7 @@ export default function PitBoard() {
         if (stopped) return;
         await ingest(raw, via, uuid);
       } catch (e) {
-        showError(e);
+        if (!quiet) showError(e);
       } finally {
         busy = false;
       }
@@ -3280,8 +3303,10 @@ export default function PitBoard() {
       window.addEventListener("message", onPageMessage);
       // reconnexion automatique : si la page RIS ne transmet plus rien (page rechargée, favori perdu, onglet fermé),
       // PitBoard lit lui-même le flux (lecture directe, puis relais Vercel) tant que la page ne reprend pas la main
+      // en parallèle, lecture directe toutes les 3 s : la page RIS ne rafraîchit pas assez vite pour l'entrée / sortie des stands
+      // (erreurs silencieuses tant que la page transmet : la lecture directe n'est qu'un renfort)
       const fallback = setInterval(() => {
-        if (/^[0-9a-fA-F-]{36}$/.test(uuid) && Date.now() - lastPageMsgAt > 15000) tick();
+        if (/^[0-9a-fA-F-]{36}$/.test(uuid)) tick(Date.now() - lastPageMsgAt <= 15000);
       }, 3000);
       return () => {
         stopped = true;
@@ -3913,10 +3938,10 @@ export default function PitBoard() {
   }
 
   // essais : le team manager (ou l'admin) indique que la voiture est partie sur la piste ; la consommation démarre à ce moment
-  function startRun(carId) {
+  function startRun(carId, startAt) {
     const st = stintsRef.current[carId] || { lastExitAt: null, log: [] };
     if (st.lastExitAt) return;
-    pushStints({ ...stintsRef.current, [carId]: { ...st, lastExitAt: Date.now() } });
+    pushStints({ ...stintsRef.current, [carId]: { ...st, lastExitAt: typeof startAt === "number" && startAt > 0 ? startAt : Date.now() } });
   }
   // essais : annule un lancement fait par erreur (seulement avant le premier arrêt)
   function cancelRun(carId) {
@@ -4100,7 +4125,7 @@ export default function PitBoard() {
   // le relais live tourne dans une minuterie créée une seule fois : il doit toujours appeler
   // la version la plus récente de pushFlag (état `flag` et `calls` à jour)
   pushFlagRef.current = pushFlag;
-  autoPitRef.current = { forceArrival, removeCall, speakEntry: (num) => { if (soundOnRef.current) speakTrackPoint(audioCtxRef, num, "Entrée"); } };
+  autoPitRef.current = { forceArrival, removeCall, startRun, speakEntry: (num) => { if (soundOnRef.current) speakTrackPoint(audioCtxRef, num, "Entrée"); } };
 
   const theme = FLAGS[flag];
   const bgStyle =
@@ -4656,7 +4681,7 @@ export default function PitBoard() {
                     ? "Session terminée côté chronométrage."
                     : !liveInfo.feedFresh
                     ? `Le flux RIS n'évolue plus (dernière donnée il y a ${liveInfo.feedAgeSec} s).`
-                    : "Flux RIS à jour."
+                    : `Flux RIS à jour. Retard affiché = âge de la donnée RIS : ${Math.max(0, Math.round((now - liveInfo.generatedAt) / 1000))} s (si ce chiffre est élevé, le retard vient de RIS lui-même).`
                 }
               >
                 {!liveInfo && <>⚪ Live : en attente</>}
@@ -4666,7 +4691,7 @@ export default function PitBoard() {
                   <>🟠 Live : flux figé</>
                 )}
                 {liveInfo && liveInfo.relayAlive && liveInfo.status !== "FINISHED" && liveInfo.feedFresh && (
-                  <>🟢 Live{settings.liveFlagAuto ? " · drapeaux auto" : ""}{liveInfo.trackStateRaw ? ` · ${liveInfo.trackStateRaw}` : ""}</>
+                  <>🟢 Live{settings.liveFlagAuto ? " · drapeaux auto" : ""}{liveInfo.trackStateRaw ? ` · ${liveInfo.trackStateRaw}` : ""} · {Math.max(0, Math.round((now - liveInfo.generatedAt) / 1000))} s</>
                 )}
               </div>
             )}
@@ -5935,6 +5960,7 @@ export default function PitBoard() {
                           canCancel={!!(stM && stM.lastExitAt && (stM.log || []).length === 0)}
                           onStart={() => startRun(myCar.id)}
                           onCancel={() => cancelRun(myCar.id)}
+                          auto={risOk && !!myLive}
                         />
                       ) : (
                       <div className="rounded-xl bg-black/80 border-2 px-3 py-1.5 flex items-center gap-3" style={{ borderColor: fuelColor }}>
