@@ -3242,10 +3242,21 @@ export default function PitBoard() {
         if (!msg) return;
         ingest(msg.raw, "page", msg.uuid || uuid).catch(showError);
       };
-      window.addEventListener("message", onMessage);
+      let lastPageMsgAt = Date.now();
+      const onPageMessage = (event) => {
+        if (readRisMessage(event)) lastPageMsgAt = Date.now();
+        onMessage(event);
+      };
+      window.addEventListener("message", onPageMessage);
+      // reconnexion automatique : si la page RIS ne transmet plus rien (page rechargée, favori perdu, onglet fermé),
+      // PitBoard lit lui-même le flux (lecture directe, puis relais Vercel) tant que la page ne reprend pas la main
+      const fallback = setInterval(() => {
+        if (/^[0-9a-fA-F-]{36}$/.test(uuid) && Date.now() - lastPageMsgAt > 15000) tick();
+      }, 3000);
       return () => {
         stopped = true;
-        window.removeEventListener("message", onMessage);
+        clearInterval(fallback);
+        window.removeEventListener("message", onPageMessage);
       };
     }
 
@@ -4961,6 +4972,10 @@ export default function PitBoard() {
                       <b>À chaque session :</b> cliquez « Ouvrir la page RIS », puis, dans l'onglet RIS qui
                       s'ouvre, cliquez sur le favori « PitBoard ↔ RIS ». Un petit message « flux transmis »
                       apparaît en bas à gauche de la page RIS. Laissez les deux onglets ouverts.
+                      <br />
+                      <b>Reconnexion automatique :</b> si la page RIS ne transmet plus rien pendant 15 s (page
+                      rechargée, favori perdu), PitBoard lit le flux tout seul (à condition que l'uuid du flux
+                      ci-dessous soit renseigné) et reprend la page dès qu'elle retransmet.
                     </div>
                     <div className="flex items-center gap-2 flex-wrap">
                       <button
