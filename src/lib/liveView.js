@@ -287,6 +287,8 @@ export function linePhase(c, ref) {
 }
 
 const OFF_TRACK = /FUEL|PIT|STOP|OUT|GARAGE|BOX|STAND|ENTR|PARK|(^|[^A-Za-z])IN([^A-Za-z]|$)/i; // voiture au stand (ou qui y entre / en sort) : pas une voiture "de piste"
+// voiture au stand (entrée en cours ou arrêtée) : état « pit » du flux, sans les états de sortie (OUT)
+export const isPitIn = (state) => OFF_TRACK.test(state || "") && !/OUT/i.test(state || "");
 
 // médiane des derniers tours de toutes les voitures : sert à repérer un tour de stand (très long par rapport aux autres),
 // sans éliminer tout le monde pendant une neutralisation où tous roulent lentement

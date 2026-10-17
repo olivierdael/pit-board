@@ -28,7 +28,7 @@ import {
   lapBests,
   lapsToCsv,
 } from "./lib/drivers";
-import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, fcyFromRc, trackAlertRows, aroundOnTrack, pitOutCars, carLaps, classPositions, pitExitInfo, saveLiveMemory, loadLiveMemory, setLiveTemperature, getLiveTemperature } from "./lib/liveView";
+import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, fcyFromRc, trackAlertRows, aroundOnTrack, pitOutCars, carLaps, classPositions, isPitIn, pitExitInfo, saveLiveMemory, loadLiveMemory, setLiveTemperature, getLiveTemperature } from "./lib/liveView";
 import {
   Flag,
   Plus,
@@ -1856,7 +1856,7 @@ function DriverStrip({ ds, canEdit, onSet, hideTotals }) {
   return (
     <div className="rounded bg-white/5 px-2 py-1.5 flex flex-col gap-1 text-[11px]">
       <div className="flex items-center justify-between gap-2">
-        <span className="font-black text-white truncate">
+        <span className="font-black text-white truncate rounded px-1" style={curDriver && !cur.confirmed ? { animation: "pbblink 1s infinite" } : undefined}>
           {curDriver ? driverName(curDriver) || "Pilote sans nom" : "Aucun pilote disponible"}
         </span>
         <span className="text-white/50 text-[10px] whitespace-nowrap">
@@ -1878,7 +1878,7 @@ function DriverStrip({ ds, canEdit, onSet, hideTotals }) {
           {cur.confirmed ? (
             <span className="text-green-400 font-bold">✓ Confirmé</span>
           ) : (
-            <span className="text-amber-400 font-bold">Pilote prévu, à confirmer</span>
+            <span className="text-amber-400 font-bold rounded px-1" style={{ animation: "pbblink 1s infinite" }}>Pilote prévu, à confirmer</span>
           )}
           {canEdit && !cur.confirmed && (
             <button
@@ -2250,6 +2250,7 @@ export default function PitBoard() {
   const lastRawRef = useRef(null); // dernier flux brut reçu (poste Admin), pour l'échantillon de diagnostic
   const [sampleText, setSampleText] = useState(""); // seulement sur le poste Admin qui relaie
   const pushFlagRef = useRef(null);
+  const autoPitRef = useRef(null); // forceArrival / removeCall à jour, pour le relais RIS (entrée et sortie des stands automatiques)
   const lastFeedFlagRef = useRef(null);
   const lastSeenFlagRef = useRef(null);
   const autoPushedFlagRef = useRef(null);
@@ -2543,6 +2544,30 @@ export default function PitBoard() {
   }, [liveInfo]);
 
   // données live d'une voiture (null si pas de flux, relais arrêté ou voiture absente du flux)
+  // connexion au chronométrage RIS perdue : grosse alerte plein écran (après avoir été connecté pendant cette session de la page)
+  const risEverLiveRef = useRef(false);
+  const risUuidRef = useRef("");
+  if (risUuidRef.current !== (settings.liveUuid || "")) {
+    risUuidRef.current = settings.liveUuid || "";
+    risEverLiveRef.current = false; // autre événement : on repart de zéro
+  }
+  const risOk = !!(liveInfo && liveInfo.relayAlive && liveInfo.feedFresh);
+  if (risOk) risEverLiveRef.current = true;
+  const risLost = !!settings.liveEnabled && risEverLiveRef.current && !risOk && !(liveInfo && liveInfo.status === "FINISHED");
+  const [risDismissed, setRisDismissed] = useState(false);
+  useEffect(() => {
+    if (!risLost) {
+      setRisDismissed(false);
+      return;
+    }
+    if (soundOnRef.current) speakYellowAlert(audioCtxRef, "Attention! Connexion au chronométrage perdue!");
+  }, [risLost]);
+  const risLostMsg = !liveInfo
+    ? "Plus aucune donnée reçue du chronométrage."
+    : !liveInfo.relayAlive
+    ? `Le poste Admin qui relaie le flux n'a rien envoyé depuis ${liveInfo.relayAgeSec} s.`
+    : `Le flux RIS n'évolue plus (dernière donnée il y a ${liveInfo.feedAgeSec} s).`;
+
   function liveFor(car) {
     if (!liveInfo || !liveInfo.relayAlive) return null;
     return liveInfo.cars[normalizeCarNumber(car.numero)] || null;
@@ -3089,6 +3114,38 @@ export default function PitBoard() {
       if (changed) pushSettings({ ...settingsRef.current, drivers });
     }
 
+    // entrée / sortie des stands pilotées par le flux RIS (poste Admin qui relaie) : l'état « pit » du flux déclenche l'entrée
+    // de l'annonce, le retour en piste (OUT) la sortie ; deux lectures consécutives sont exigées pour éviter un faux départ
+    const pitCount = {}; // { idAnnonce: { in: n, out: n, seen: bool } }
+    function autoPit(live, nowMs) {
+      if (nowMs - live.generatedAt > 90000) return;
+      const api = autoPitRef.current;
+      if (!api) return;
+      carsRef.current.forEach((car) => {
+        const lc = live.cars[normalizeCarNumber(car.numero)];
+        if (!lc) return;
+        const call = callsRef.current.find((c) => c.carId === car.id);
+        if (!call) return;
+        const st = pitCount[call.id] || (pitCount[call.id] = { in: 0, out: 0, seen: false });
+        const inPit = isPitIn(lc.state);
+        st.in = inPit ? st.in + 1 : 0;
+        st.out = inPit ? 0 : st.out + 1;
+        if (call.phase === "countdown") {
+          if (st.in >= 2) {
+            api.forceArrival(call.id);
+            api.speakEntry(call.numero);
+            st.seen = true;
+          }
+        } else if (call.phase === "instand") {
+          if (inPit) st.seen = true;
+          else if (st.seen && st.out >= 2) {
+            delete pitCount[call.id];
+            api.removeCall(call.id);
+          }
+        }
+      });
+    }
+
     // historique des messages RC : le poste Admin qui relaie note chaque nouveau message avec l'heure
     // à laquelle il apparaît (l'heure "at" du flux est celle de la génération du flux, pas de la parution)
     let rcPrev = null;
@@ -3138,6 +3195,7 @@ export default function PitBoard() {
         try {
           recordBests(live);
           recordRc(live, nowMs);
+          autoPit(live, nowMs);
         } catch (e) {}
         if (!stopped) {
           setRelayStatus({
@@ -4001,6 +4059,7 @@ export default function PitBoard() {
   // le relais live tourne dans une minuterie créée une seule fois : il doit toujours appeler
   // la version la plus récente de pushFlag (état `flag` et `calls` à jour)
   pushFlagRef.current = pushFlag;
+  autoPitRef.current = { forceArrival, removeCall, speakEntry: (num) => { if (soundOnRef.current) speakTrackPoint(audioCtxRef, num, "Entrée"); } };
 
   const theme = FLAGS[flag];
   const bgStyle =
@@ -4401,6 +4460,23 @@ export default function PitBoard() {
         fontFamily: "'Barlow Condensed', 'Arial Narrow', Helvetica, Arial, sans-serif",
       }}
     >
+      {risLost && !risDismissed &&
+        createPortal(
+          <div
+            role="alert"
+            className="fixed inset-0 flex flex-col items-center justify-center gap-6 text-center px-6"
+            style={{ zIndex: 100000, backgroundColor: Math.floor(now / 1000) % 2 ? "#b00000" : "#ff1a1a", color: "#fff", fontFamily: "'Barlow Condensed', 'Arial Narrow', Helvetica, Arial, sans-serif" }}
+          >
+            <div style={{ fontSize: "min(22vw, 26vh)", lineHeight: 1 }}>⚠</div>
+            <div className="font-black uppercase" style={{ fontSize: "min(9vw, 14vh)", lineHeight: 1.05 }}>Connexion RIS perdue</div>
+            <div className="font-bold" style={{ fontSize: "min(4vw, 6vh)" }}>{risLostMsg}</div>
+            <div className="font-semibold opacity-90" style={{ fontSize: "min(3vw, 4.5vh)" }}>Classement, écarts et tours ne sont plus mis à jour. Cette alerte disparaît toute seule dès que le flux revient.</div>
+            <button type="button" onClick={() => setRisDismissed(true)} className="mt-2 rounded-lg bg-black/40 hover:bg-black/60 px-6 py-3 text-lg font-black uppercase tracking-wide">
+              Masquer jusqu'à la prochaine perte
+            </button>
+          </div>,
+          document.body
+        )}
       <div className={`max-w-7xl mx-auto px-3 pb-20 ${myCar ? "py-2" : "py-4"}`}>
         <style>{"@keyframes pbblink{0%,100%{background:#ff1f1f;color:#fff}50%{background:#ffe600;color:#000}}"}</style>
         {fcyActive && (
@@ -5229,12 +5305,14 @@ export default function PitBoard() {
                     const overMax = d && d.phase === "instand" && d.pitElapsed >= AUTO_REMOVE_AFTER_PIT_SEC - 30;
                     const nearEnd = d && d.phase === "countdown" && d.remaining <= 30 && d.remaining > 0;
                     const ringColor = overMax ? "#ff3b3b" : nearEnd ? "#ffd400" : "rgba(0,0,0,0.35)";
+                    const autoCar = risOk && !!liveFor(car); // flux RIS en ligne pour cette voiture : entrée et sortie des stands automatiques
                     const callControls = call ? (
                                 <>
                                   {d.phase === "countdown" ? (
                                     <>
                                       <div className="flex gap-1.5 flex-wrap">
-                                        <button
+                                        {autoCar && <span className="text-[11px] font-bold text-white/70">Entrée automatique (RIS)</span>}
+                                        {!autoCar && <button
                                           onClick={() => {
                                             if (!canEdit) return;
                                             forceArrival(call.id);
@@ -5247,7 +5325,7 @@ export default function PitBoard() {
                                           style={{ backgroundColor: car.couleur1, color: "#111" }}
                                         >
                                           <PlayCircle size={13} /> Entrée
-                                        </button>
+                                        </button>}
                                       </div>
                                       <div className="flex gap-1 flex-wrap">
                                         {TRACK_POINTS.map((p) => (
@@ -5267,6 +5345,8 @@ export default function PitBoard() {
                                         ))}
                                       </div>
                                     </>
+                                  ) : autoCar ? (
+                                    <span className="text-[11px] font-bold text-white/70">Sortie automatique (RIS) : détectée dès que la voiture repart</span>
                                   ) : confirmExitId === call.id ? (
                                     <div className="flex items-center gap-2">
                                       <span className="text-white text-xs font-bold">Confirmer ?</span>
