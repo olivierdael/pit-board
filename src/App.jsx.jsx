@@ -1545,7 +1545,7 @@ function loadClassement() {
   }
   return d;
 }
-function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow }) {
+function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow, quali }) {
   const BLUE = "#5cc8ff";
   const [openNum, setOpenNum] = useState(null); // voiture dont on affiche le détail des tours (clic sur son nom)
   const tcls = "text-[13px]"; // jamais moins de 12 px
@@ -1620,8 +1620,8 @@ function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow })
         <span style={hl(c.s2, c.s2b, isMe)}>{fmtSec1(c.s2)}</span>
         <span style={hl(c.s3, c.s3b, isMe)}>{fmtSec1(c.s3)}</span>
         <span className="text-right">{isMe ? "" : <>{isAhead ? "▲ " : "▼ "}{gapCell(r, isAhead)}</>}</span>
-        <span className="text-right">{isMe ? "" : gainCell(r)}</span>
-        <span className="text-right border-l-2 border-white/50 pl-1.5">{isMe ? "" : gainCell(r, "lapGainMs")}</span>
+        <span className="text-right">{isMe ? (quali ? gainBadge(selfSectorGaps(me).last) : "") : gainCell(r)}</span>
+        <span className="text-right border-l-2 border-white/50 pl-1.5">{isMe ? (quali ? gainBadge(selfSectorGaps(me).sum) : "") : gainCell(r, "lapGainMs")}</span>
         <span className="text-right border-l-2 border-white/50 pl-1.5" title="Temps écoulé depuis la dernière sortie des stands (chronomètre)">
           {(() => {
             const pi = pitExitInfo(isMe ? num : r.num);
@@ -1677,6 +1677,23 @@ function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow })
 
 // bloc "live" d'une tuile : temps de course, tour, intermédiaires, puis (si showTable) le classement
 // avec les 3 voitures devant et les 3 derrière, leurs intermédiaires et leur écart avec nous
+// qualification / essais : écart de notre voiture à ses meilleurs secteurs de la séance (flux RIS) : gain = meilleur - actuel (> 0 : plus rapide)
+function selfSectorGaps(c) {
+  const g = [1, 2, 3].map((k) => (c && c["s" + k] != null && c["s" + k + "b"] != null ? c["s" + k + "b"] - c["s" + k] : null));
+  const have = g.filter((v) => v != null);
+  const sum = have.length ? have.reduce((x, y) => x + y, 0) : null;
+  let last = null;
+  for (let i = 2; i >= 0; i--) if (g[i] != null) { last = g[i]; break; }
+  return { g, sum, last };
+}
+// pastille verte (plus rapide que notre meilleur) / rouge (plus lent), comme la colonne Gain
+function gainBadge(ms) {
+  if (ms == null) return <span className="text-white/30">–</span>;
+  const v = ms / 1000;
+  if (Math.abs(v) < 0.05) return <span className="rounded px-1 bg-white/20 text-white font-black">0.0</span>;
+  return v > 0 ? <span className="rounded px-1 bg-green-600 text-white font-black">+{v.toFixed(1)}</span> : <span className="rounded px-1 bg-red-600 text-white font-black">−{Math.abs(v).toFixed(1)}</span>;
+}
+
 function LiveBlock({ info, live, num, now, showTable, driverBest, pilot = "", part = "all", big = false }) {
   const [wins, setWins] = useState({ cl: false, ar: false, ou: false }); // 3 fenêtres flottantes indépendantes
   const [cl, setClRaw] = useState(loadClassement); // réglages du tableau « Classement » (mémorisés sur l'appareil)
@@ -1716,7 +1733,7 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, pilot = "", pa
     <>
       {wins.cl && (
         <WindowHost title="Classement" storeKey="cl" wide startPos={{ x: 16, y: 72 }} onClose={closeWin("cl")}>
-          <ClassementPanel cars={info.cars} num={num} now={now} st={cl} setSt={setCl} big inWindow />
+          <ClassementPanel cars={info.cars} num={num} now={now} st={cl} setSt={setCl} big inWindow quali={!!info.quali} />
         </WindowHost>
       )}
       {wins.ar && (
@@ -1801,6 +1818,18 @@ function LiveBlock({ info, live, num, now, showTable, driverBest, pilot = "", pa
           S3 {sec(live.s3, live.s3b)} <span style={{ color: BLUE }}>({fmtMs(live.s3b)})</span>
         </span>
       </div>
+      {info.quali && (() => {
+        const sg = selfSectorGaps(live);
+        return (
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5" title="Écart de chaque secteur de notre voiture à son meilleur secteur de la séance : vert = plus rapide, rouge = plus lent">
+            <span className="text-white/60">vs meilleur</span>
+            <span>S1 {gainBadge(sg.g[0])}</span>
+            <span>S2 {gainBadge(sg.g[1])}</span>
+            <span>S3 {gainBadge(sg.g[2])}</span>
+            <span>Σ {gainBadge(sg.sum)}</span>
+          </div>
+        );
+      })()}
       {driverBest && (() => {
         // secours : si le poste Admin n'a rien enregistré, meilleurs temps des tours vus sur cet écran
         let bestShown = driverBest.best && (driverBest.best.lap || driverBest.best.s1 || driverBest.best.s2 || driverBest.best.s3) ? driverBest.best : null;
@@ -2381,6 +2410,7 @@ export default function PitBoard() {
       relayAgeSec,
       feedFresh: feedAgeSec <= 90 && liveRow.status !== "FINISHED",
       feedAgeSec,
+      quali: (settings.eventType || "course") !== "course", // qualification / essais : écarts de notre voiture à ses meilleurs secteurs
       status: liveRow.status || "",
       trackStateRaw: liveRow.trackStateRaw,
       generatedAt: liveRow.generatedAt,
@@ -2388,7 +2418,7 @@ export default function PitBoard() {
       elapsedMs: liveRow.elapsedMs == null ? null : liveRow.elapsedMs,
       remainingMs: liveRow.remainingMs == null ? null : liveRow.remainingMs,
     };
-  }, [settings.liveEnabled, settings.liveUuid, settings.liveSource, liveRow, now]);
+  }, [settings.liveEnabled, settings.liveUuid, settings.liveSource, settings.eventType, liveRow, now]);
 
   // alertes RC : mémoire locale de cet écran (en plus de l'historique noté par le poste Admin), pour qu'aucune alerte ne soit ratée
   const rcLocalKey = "pitboard_rclocal_" + ((settings.liveUuid || "").trim() || "x");
