@@ -28,7 +28,7 @@ import {
   lapBests,
   lapsToCsv,
 } from "./lib/drivers";
-import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, fcyFromRc, trackAlertRows, aroundOnTrack, pitOutCars, carLaps, classPositions, isPitIn, pitExitInfo, saveLiveMemory, loadLiveMemory, setLiveTemperature, getLiveTemperature } from "./lib/liveView";
+import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, fcyFromRc, trackAlertRows, aroundOnTrack, pitOutCars, carLaps, classPositions, isPitIn, aroundWhyNot, pitExitInfo, saveLiveMemory, loadLiveMemory, setLiveTemperature, getLiveTemperature } from "./lib/liveView";
 import {
   Flag,
   Plus,
@@ -1185,7 +1185,7 @@ function AroundTable({ data, prio, alerts, myPos, myNum, myTeam, pilot, now, sta
     );
   };
   const band = (txt, extra) => <div className={`px-2 py-0.5 font-black uppercase tracking-wide text-xs ${extra}`}>{txt}</div>;
-  if (!data) return <div className="text-white/70 font-sans text-sm p-2">Pas encore assez de données (il faut quelques tours de notre voiture).</div>;
+  if (!data) return <div className="text-white/70 font-sans text-sm p-2">Pas encore de données : {cars && myNum ? aroundWhyNot(cars, myNum, now) : "il faut quelques tours de notre voiture."}</div>;
   // alertes dont la voiture n'est pas dans les listes affichées
   const shownNums = new Set([...data.ahead, ...data.behind].map((r) => r.num));
   const hidden = (alerts || []).filter((d) => !shownNums.has(d.num));

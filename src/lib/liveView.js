@@ -591,6 +591,22 @@ export function aroundOnTrack(cars, myNum, nowMs, store = paceStore, hist = lapS
   return { ahead, behind, mode, me: cls[myNum] || null, myAvg, ref: { point: ["S1", "S2", "Ligne"][myPts[a].k], at: myPts[a].t } };
 }
 
+// pourquoi le tableau « autour de nous » est vide : phrase d'explication pour l'écran
+export function aroundWhyNot(cars, myNum, nowMs, hist = lapStore, store = paceStore) {
+  const me = cars && cars[myNum];
+  if (!me) return "Notre voiture n'apparaît pas dans le flux.";
+  if (OFF_TRACK.test(me.state || "")) return "Notre voiture est aux stands : le tableau reviendra dès qu'elle sera repartie et aura franchi quelques points de chronométrage.";
+  if (me.lapEnd == null) return "Notre voiture n'a pas encore franchi la ligne d'arrivée de son tour.";
+  const mySec = expectedSectors(myNum, me, me, store, hist);
+  if (!mySec) {
+    const n = (hist[myNum] || []).filter((h) => h.s).length;
+    return `Il faut au moins 2 tours complets de notre voiture avec les 3 secteurs (${n} vu${n > 1 ? "s" : ""} sur cet écran), ou un meilleur tour avec ses 3 secteurs.`;
+  }
+  const myPts = pointTimeline(myNum, me, nowMs, mySec, hist);
+  if (myPts.length < 2) return "Notre voiture n'a pas encore franchi assez de points de chronométrage (S1, S2, ligne).";
+  return "Aucune autre voiture comparable pour le moment (voitures très espacées sur la piste ou aux stands : fréquent en qualification).";
+}
+
 function duelEstimatesPoints(cars, myNum, remainingMs, store, nowMs, hist = lapStore) {
   const me = cars && cars[myNum];
   if (!me || me.lapEnd == null) return null;
