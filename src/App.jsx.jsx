@@ -1043,7 +1043,7 @@ function EssaisConsoCard({ run, tankL, lapsKm, savedValue, onSave, running, canC
       <div className="flex items-center gap-3 flex-wrap text-white">
         <span className="text-sm font-black uppercase tracking-wide whitespace-nowrap">⛽ Essais · plein de {tankL} L au départ</span>
         {!running ? (
-          <button type="button" onClick={onStart} className="px-3 py-1 rounded font-black uppercase text-xs bg-green-500 text-black hover:bg-green-400">
+          <button type="button" onClick={onStart} className="px-6 py-3 rounded-lg font-black uppercase text-2xl leading-tight shadow-lg" style={{ animation: "pbblink 0.8s infinite" }}>
             🏁 Voiture sur la piste : lancer le calcul
           </button>
         ) : (
