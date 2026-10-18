@@ -1547,7 +1547,7 @@ function loadClassement() {
   }
   return d;
 }
-function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow, quali, teamNums }) {
+function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow, quali, teamNums, bands }) {
   const BLUE = "#5cc8ff";
   const [openNum, setOpenNum] = useState(null); // voiture dont on affiche le détail des tours (clic sur son nom)
   const tcls = "text-[13px]"; // jamais moins de 12 px
@@ -1609,19 +1609,25 @@ function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow, q
     const c = isMe ? me : cars[r.num] || {};
     const id = isMe ? num : r.num;
     const isTeam = !isMe && Array.isArray(teamNums) && teamNums.includes(normalizeCarNumber(r.num)); // autre voiture de la team : écriture orange
+    // poste Admin : chaque voiture de la team a un bandeau à ses couleurs (le team manager garde bandeau jaune + écriture orange)
+    const band = bands ? bands[normalizeCarNumber(isMe ? num : r.num)] : null;
+    const lightBg = band ? band.fg === "#111" : isMe;
+    const rowStyle = band
+      ? { ...cols, color: band.fg, backgroundColor: band.bg, borderLeft: `6px solid ${band.edge}`, borderRadius: 4, ...(isMe ? { boxShadow: "inset 0 0 0 2px #fff" } : {}) }
+      : isMe ? { ...cols, color: "#000", backgroundColor: "#ffe600" } : isTeam ? { ...cols, color: "#ff9500" } : cols;
     return (
       <React.Fragment key={id}>
-      <div className={`${rowCls} px-1 py-0.5 ${isMe ? "rounded font-black" : isTeam ? "font-black" : "text-white"}`} style={isMe ? { ...cols, color: "#000", backgroundColor: "#ffe600" } : isTeam ? { ...cols, color: "#ff9500" } : cols}>
+      <div className={`${rowCls} px-1 py-0.5 ${isMe || band ? "rounded font-black" : isTeam ? "font-black" : "text-white"}`} style={rowStyle}>
         <span>{cat ? (r.pic != null ? `${r.pic}e` : "") : `P${c.pos}`}</span>
         <span className="truncate font-sans cursor-pointer underline decoration-dotted underline-offset-2" title="Cliquer pour voir ses tours et ses meilleurs temps (S1, S2, S3)" onClick={() => setOpenNum(openNum === id ? null : id)}>
           #{isMe ? num : r.num} {c.team}
           {cat ? ` · P${c.pos}` : ""}
         </span>
         <span>{c.laps ?? "–"}</span>
-        <span style={hl(c.last, c.best, isMe)}>{fmtMs(c.last)}</span>
-        <span style={hl(c.s1, c.s1b, isMe)}>{fmtSec1(c.s1)}</span>
-        <span style={hl(c.s2, c.s2b, isMe)}>{fmtSec1(c.s2)}</span>
-        <span style={hl(c.s3, c.s3b, isMe)}>{fmtSec1(c.s3)}</span>
+        <span style={hl(c.last, c.best, lightBg)}>{fmtMs(c.last)}</span>
+        <span style={hl(c.s1, c.s1b, lightBg)}>{fmtSec1(c.s1)}</span>
+        <span style={hl(c.s2, c.s2b, lightBg)}>{fmtSec1(c.s2)}</span>
+        <span style={hl(c.s3, c.s3b, lightBg)}>{fmtSec1(c.s3)}</span>
         <span className="text-right">{isMe ? "" : <>{isAhead ? "▲ " : "▼ "}{gapCell(r, isAhead)}</>}</span>
         <span className="text-right">{isMe ? (quali ? gainBadge(selfSectorGaps(me).last) : "") : gainCell(r)}</span>
         <span className="text-right border-l-2 border-white/50 pl-1.5">{isMe ? (quali ? gainBadge(selfSectorGaps(me).sum) : "") : gainCell(r, "lapGainMs")}</span>
@@ -1674,6 +1680,132 @@ function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow, q
           Écart mesuré à chaque point (S1, S2, L = ligne) franchi par la voiture et par nous. Gain : temps pris (vert +) ou perdu (rouge −) sur la voiture dans le dernier tronçon. Σ tour : cumul S1 + S2 + S3 en direct, donc le total sur le tour complet une fois la ligne franchie. Sortie stand : chronomètre depuis la dernière sortie des stands (le relais en cours de la voiture).
         </div>
       )}
+    </div>
+  );
+}
+
+// bandeau aux couleurs d'une voiture de la team : fond = couleur 1, texte noir ou blanc selon la clarté, liseré = couleur 2
+function carBand(car) {
+  const hex = (/^#[0-9a-f]{6}$/i.test(car.couleur1 || "") ? car.couleur1 : "#444444").slice(1);
+  const lum = (parseInt(hex.slice(0, 2), 16) * 299 + parseInt(hex.slice(2, 4), 16) * 587 + parseInt(hex.slice(4, 6), 16) * 114) / 1000;
+  return { bg: "#" + hex, fg: lum > 150 ? "#111" : "#fff", edge: /^#[0-9a-f]{6}$/i.test(car.couleur2 || "") ? car.couleur2 : "#ffffff" };
+}
+// « Classement » du poste Admin : une voiture en particulier (même tableau que le team manager, avec Gain et Σ tour),
+// toutes les voitures de la team, ou toutes les voitures de la course (sans Gain ni Σ : il n'y a pas de voiture de référence)
+const ADMCL_KEY = "pitboard_adminclass";
+function loadAdminCl() {
+  const d = { sel: "team", mode: "general", nA: 10, nB: 10 };
+  try {
+    const v = JSON.parse(localStorage.getItem(ADMCL_KEY) || "null");
+    if (v) return { sel: typeof v.sel === "string" && v.sel ? v.sel : "team", mode: v.mode === "cat" ? "cat" : "general", nA: Number(v.nA) > 0 ? Number(v.nA) : 10, nB: Number(v.nB) > 0 ? Number(v.nB) : 10 };
+  } catch {
+    /* stockage indisponible */
+  }
+  return d;
+}
+function AdminClassement({ cars, now, teamCars, st, setSt, quali }) {
+  const BLUE = "#5cc8ff";
+  const [openNum, setOpenNum] = useState(null);
+  const bands = useMemo(() => {
+    const m = {};
+    teamCars.forEach((c) => {
+      m[normalizeCarNumber(c.numero)] = carBand(c);
+    });
+    return m;
+  }, [teamCars]);
+  const cls = classPositions(cars);
+  const selNum = st.sel.startsWith("car:") ? st.sel.slice(4) : null;
+  const teamKeys = teamCars.map((c) => normalizeCarNumber(c.numero));
+  const others = Object.keys(cars)
+    .filter((n) => !teamKeys.includes(n))
+    .sort((a, b) => (cars[a].pos || 9999) - (cars[b].pos || 9999));
+  const select = (
+    <select value={st.sel} onChange={(e) => setSt({ sel: e.target.value })} className="rounded bg-black/60 border border-white/30 px-1 py-0.5 text-white font-black" title="Voiture(s) à afficher">
+      <option value="team">Toutes les voitures de la team</option>
+      <option value="all">Toutes les voitures de la course</option>
+      <optgroup label="Une voiture de la team en particulier">
+        {teamCars.map((c) => (
+          <option key={c.id} value={"car:" + normalizeCarNumber(c.numero)}>#{c.numero} {c.team || c.pilote || ""}</option>
+        ))}
+      </optgroup>
+      {others.length > 0 && (
+        <optgroup label="Une autre voiture en particulier">
+          {others.map((n) => (
+            <option key={n} value={"car:" + n}>#{n} {cars[n].team || ""}</option>
+          ))}
+        </optgroup>
+      )}
+    </select>
+  );
+  if (selNum) {
+    return (
+      <div className="flex flex-col gap-1">
+        <div className="flex flex-wrap items-center gap-2 font-sans text-[13px] text-white">{select}</div>
+        {cars[selNum] ? (
+          <ClassementPanel cars={cars} num={selNum} now={now} st={st} setSt={setSt} big inWindow quali={quali} teamNums={teamKeys} bands={bands} />
+        ) : (
+          <div className="text-white/60 font-sans text-sm p-2">La voiture #{selNum} n'est pas (ou plus) dans le flux RIS.</div>
+        )}
+      </div>
+    );
+  }
+  const cat = st.mode === "cat";
+  const rows = Object.keys(cars)
+    .filter((n) => st.sel === "all" || bands[n])
+    .map((n) => ({ n, c: cars[n], k: cls[n] || {} }));
+  rows.sort(cat
+    ? (a, b) => String(a.k.cat || "").localeCompare(String(b.k.cat || "")) || (a.k.pic ?? 9999) - (b.k.pic ?? 9999)
+    : (a, b) => (a.c.pos || 9999) - (b.c.pos || 9999));
+  const colList = [["2.6rem", "Pos"], ["3.6rem", "PIC"], ["minmax(6rem,1fr)", "Voiture"], ["3rem", "Tours"], ["4.2rem", "Tour"], ["3rem", "S1"], ["3rem", "S2"], ["3rem", "S3"], ["6rem", "Sortie stand"]];
+  const cols = { gridTemplateColumns: colList.map((c) => c[0]).join(" ") };
+  const rowCls = "grid items-center gap-x-1.5 font-mono whitespace-nowrap text-[13px]";
+  const isBest = (v, b) => v != null && b != null && v <= b;
+  const hl = (v, b, light) => (isBest(v, b) ? { color: light ? "#0033cc" : BLUE, fontWeight: 800 } : undefined);
+  const chip = (id, label) => (
+    <button key={id} type="button" onClick={() => setSt({ mode: id })} className={`rounded px-1.5 py-0.5 font-black border ${st.mode === id ? "bg-yellow-400 text-black border-yellow-400" : "bg-black/40 text-white border-white/30"}`}>
+      {label}
+    </button>
+  );
+  let lastCat = null;
+  return (
+    <div className="flex flex-col gap-0.5">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pb-1 font-sans text-[13px] text-white">
+        {select}
+        {chip("general", "Général")}
+        {chip("cat", "Catégorie (PIC)")}
+        <span className="text-white/50 text-xs">Gain et somme du tour : choisir une voiture en particulier.</span>
+      </div>
+      <div className={`${rowCls} px-1 text-white/60 uppercase`} style={cols}>
+        {colList.map((c, i) => (
+          <span key={i} className={c[1] === "Sortie stand" ? "text-right border-l-2 border-white/50 pl-1.5" : ""}>{c[1]}</span>
+        ))}
+      </div>
+      {rows.length === 0 && <div className="text-white/60 font-sans text-sm p-2">Aucune voiture à afficher dans le flux RIS.</div>}
+      {rows.map(({ n, c, k }) => {
+        const band = bands[n];
+        const light = band ? band.fg === "#111" : false;
+        const head = cat && k.cat !== lastCat ? (lastCat = k.cat, <div key={"h" + n} className="font-sans text-xs uppercase text-white/60 pt-1">Catégorie {k.cat || "?"}</div>) : null;
+        const pi = pitExitInfo(n);
+        return (
+          <React.Fragment key={n}>
+            {head}
+            <div className={`${rowCls} px-1 py-0.5 ${band ? "rounded font-black" : "text-white"}`} style={band ? { ...cols, color: band.fg, backgroundColor: band.bg, borderLeft: `6px solid ${band.edge}`, borderRadius: 4 } : cols}>
+              <span>P{c.pos ?? "–"}</span>
+              <span>{k.pic != null ? `${k.pic}e` : ""}{k.cat ? <span className="font-sans text-[10px] opacity-70"> {k.cat}</span> : null}</span>
+              <span className="truncate font-sans cursor-pointer underline decoration-dotted underline-offset-2" title="Cliquer pour voir ses tours et ses meilleurs temps (S1, S2, S3)" onClick={() => setOpenNum(openNum === n ? null : n)}>#{n} {c.team}</span>
+              <span>{c.laps ?? "–"}</span>
+              <span style={hl(c.last, c.best, light)}>{fmtMs(c.last)}</span>
+              <span style={hl(c.s1, c.s1b, light)}>{fmtSec1(c.s1)}</span>
+              <span style={hl(c.s2, c.s2b, light)}>{fmtSec1(c.s2)}</span>
+              <span style={hl(c.s3, c.s3b, light)}>{fmtSec1(c.s3)}</span>
+              <span className="text-right border-l-2 border-white/50 pl-1.5">
+                {!pi ? <span className="opacity-40">–</span> : pi.inPit ? <span className="opacity-60 font-sans">au stand</span> : fmtTimeHMS(Math.max(0, Math.round((now - pi.at) / 1000)))}
+              </span>
+            </div>
+            {openNum === n && <CarLapsDetail c={c} num={n} cols={cols} />}
+          </React.Fragment>
+        );
+      })}
     </div>
   );
 }
@@ -2602,6 +2734,83 @@ export default function PitBoard() {
     ? `Le poste Admin qui relaie le flux n'a rien envoyé depuis ${liveInfo.relayAgeSec} s.`
     : `Le flux RIS n'évolue plus (dernière donnée il y a ${liveInfo.feedAgeSec} s).`;
 
+  // flux figé : le relais Admin est vivant mais le contenu (chrono de course, tours, intermédiaires) n'a pas bougé depuis un moment.
+  // Normal pendant la préparation de la course côté RIS ; anormal une fois la course lancée (ou si le flux avait déjà bougé) : alerte pour relancer vite.
+  const FROZEN_LIMIT_SEC = 25;
+  const frozenRef = useRef({ sig: "", since: Date.now(), moved: false });
+  const relayKickRef = useRef(null);
+  let frozenFor = 0;
+  let raceLaunched = false;
+  if (liveInfo && liveInfo.relayAlive) {
+    const fr = frozenRef.current;
+    let acc = 0;
+    let n = 0;
+    for (const k in liveInfo.cars) {
+      const c = liveInfo.cars[k];
+      n++;
+      acc += (c.laps || 0) * 3 + ((c.lapEnd || 0) % 1000003) + (c.last || 0) + (c.s1 || 0) + (c.s2 || 0) + (c.s3 || 0) + (c.pits || 0) * 11;
+    }
+    const sig = n + "|" + liveInfo.elapsedMs + "|" + acc;
+    if (fr.sig !== sig) {
+      if (fr.sig) fr.moved = true;
+      fr.sig = sig;
+      fr.since = Date.now();
+    }
+    const startMs = settings.eventStartAt ? new Date(settings.eventStartAt).getTime() : NaN;
+    raceLaunched = (settings.eventType || "course") === "course" && !isNaN(startMs) && Date.now() >= startMs;
+    frozenFor = Math.round((Date.now() - Math.max(fr.since, raceLaunched ? startMs : 0)) / 1000);
+  } else {
+    frozenRef.current.sig = ""; // relais coupé : on repartira d'une mesure neuve au retour du flux
+  }
+  const feedRed = !!liveInfo && normalizeTrackState(liveInfo.trackStateRaw) === "rouge"; // drapeau rouge : chrono et voitures peuvent légitimement s'arrêter
+  const feedFrozen = !!liveInfo && liveInfo.relayAlive && liveInfo.status !== "FINISHED" && !risLost && !feedRed && (raceLaunched || frozenRef.current.moved) && frozenFor >= FROZEN_LIMIT_SEC;
+  const feedPrep = !!liveInfo && liveInfo.relayAlive && liveInfo.status !== "FINISHED" && !feedFrozen && !frozenRef.current.moved && !raceLaunched && frozenFor >= 10;
+  const [frozenDismissed, setFrozenDismissed] = useState(false);
+  useEffect(() => {
+    if (!feedFrozen) {
+      setFrozenDismissed(false);
+      return undefined;
+    }
+    const say = () => {
+      if (soundOnRef.current) speakYellowAlert(audioCtxRef, "Attention! Le flux du chronométrage est figé! Relancer!");
+    };
+    say();
+    const t = setInterval(say, 30000);
+    return () => clearInterval(t);
+  }, [feedFrozen]);
+  const kickFeed = () => {
+    if (relayKickRef.current) relayKickRef.current(); // poste Admin : relit tout de suite le flux RIS
+    else window.location.reload(); // autres postes : rechargement de la page
+  };
+
+  // classement du poste Admin : s'ouvre seul quand toutes les voitures sont en piste sans aucune annonce, se ferme à la première nouvelle annonce
+  const [admCl, setAdmClRaw] = useState(loadAdminCl);
+  const setAdmCl = (patch) =>
+    setAdmClRaw((p) => {
+      const n = { ...p, ...patch };
+      try {
+        localStorage.setItem(ADMCL_KEY, JSON.stringify(n));
+      } catch {
+        /* stockage indisponible */
+      }
+      return n;
+    });
+  const [admClOpen, setAdmClOpen] = useState(false);
+  const admCallIdsRef = useRef(null);
+  const admAllTrackRef = useRef(false);
+  useEffect(() => {
+    if (!isAdmin) return;
+    const ids = new Set(calls.map((c) => c.id));
+    const prev = admCallIdsRef.current;
+    admCallIdsRef.current = ids;
+    if (prev && calls.some((c) => !prev.has(c.id))) setAdmClOpen(false); // nouvelle annonce : retour à la vision des tuiles
+  }, [calls, isAdmin]);
+  const admAllOnTrack = isAdmin && !!liveInfo && allConfiguredCars.length > 0 && calls.length === 0 && allConfiguredCars.every((c) => !!(stints[c.id] && stints[c.id].lastExitAt));
+  useEffect(() => {
+    if (admAllOnTrack && !admAllTrackRef.current) setAdmClOpen(true); // toutes en piste, aucune annonce : le classement revient au premier plan
+    admAllTrackRef.current = admAllOnTrack;
+  }, [admAllOnTrack]);
+
   function liveFor(car) {
     if (!liveInfo || !liveInfo.relayAlive) return null;
     return liveInfo.cars[normalizeCarNumber(car.numero)] || null;
@@ -3296,6 +3505,11 @@ export default function PitBoard() {
         ingest(msg.raw, "page", msg.uuid || uuid).catch(showError);
       };
       let lastPageMsgAt = Date.now();
+      relayKickRef.current = () => {
+        lastSeq = null;
+        busy = false;
+        if (/^[0-9a-fA-F-]{36}$/.test(uuid)) tick();
+      };
       const onPageMessage = (event) => {
         if (readRisMessage(event)) lastPageMsgAt = Date.now();
         onMessage(event);
@@ -3310,15 +3524,22 @@ export default function PitBoard() {
       }, 3000);
       return () => {
         stopped = true;
+        relayKickRef.current = null;
         clearInterval(fallback);
         window.removeEventListener("message", onPageMessage);
       };
     }
 
+    relayKickRef.current = () => {
+      lastSeq = null; // force une nouvelle écriture dans Supabase
+      busy = false;
+      tick();
+    };
     tick();
     const timer = setInterval(tick, 3000);
     return () => {
       stopped = true;
+      relayKickRef.current = null;
       clearInterval(timer);
     };
   }, [isAdmin, settings.liveEnabled, settings.liveUuid, settings.liveSource]);
@@ -4543,6 +4764,48 @@ export default function PitBoard() {
           </div>,
           document.body
         )}
+      {feedFrozen && !frozenDismissed && !risLost &&
+        createPortal(
+          <div
+            role="alert"
+            className="fixed inset-0 flex flex-col items-center justify-center gap-6 text-center px-6"
+            style={{ zIndex: 99999, backgroundColor: Math.floor(now / 1000) % 2 ? "#c25a00" : "#ff8a00", color: "#000", fontFamily: "'Barlow Condensed', 'Arial Narrow', Helvetica, Arial, sans-serif" }}
+          >
+            <div style={{ fontSize: "min(20vw, 24vh)", lineHeight: 1 }}>❄</div>
+            <div className="font-black uppercase" style={{ fontSize: "min(9vw, 14vh)", lineHeight: 1.05 }}>Flux RIS figé</div>
+            <div className="font-bold" style={{ fontSize: "min(4vw, 6vh)" }}>
+              {raceLaunched ? "La course est lancée" : "Le flux bougeait avant"} mais rien ne change depuis {frozenFor} s (chrono, tours et intermédiaires).
+            </div>
+            <div className="font-semibold" style={{ fontSize: "min(3vw, 4.5vh)" }}>
+              Vérifier que le statut est bien au vert dans RIS, puis relancer. Cette alerte disparaît toute seule dès que le flux repart.
+            </div>
+            <div className="flex flex-wrap gap-3 justify-center">
+              <button type="button" onClick={kickFeed} className="rounded-lg bg-black text-white hover:bg-black/80 px-8 py-4 text-2xl font-black uppercase tracking-wide">
+                {relayKickRef.current ? "↻ Relancer la lecture du flux" : "↻ Recharger la page"}
+              </button>
+              {relayKickRef.current && (
+                <button type="button" onClick={() => window.location.reload()} className="rounded-lg bg-black/40 hover:bg-black/60 text-black px-6 py-4 text-lg font-black uppercase tracking-wide">
+                  Recharger la page (F5)
+                </button>
+              )}
+              <button type="button" onClick={() => setFrozenDismissed(true)} className="rounded-lg bg-black/40 hover:bg-black/60 text-black px-6 py-4 text-lg font-black uppercase tracking-wide">
+                Masquer
+              </button>
+            </div>
+          </div>,
+          document.body
+        )}
+      {isAdmin && admClOpen &&
+        createPortal(
+          <WindowHost title="Classement" storeKey="admcl" wide startPos={{ x: 16, y: 72 }} onClose={() => setAdmClOpen(false)}>
+            {liveInfo ? (
+              <AdminClassement cars={liveInfo.cars} now={now} teamCars={allConfiguredCars} st={admCl} setSt={setAdmCl} quali={!!liveInfo.quali} />
+            ) : (
+              <div className="text-white/70 font-sans text-sm p-2">Pas de flux RIS pour le moment.</div>
+            )}
+          </WindowHost>,
+          document.body
+        )}
       <div className={`max-w-7xl mx-auto px-3 pb-20 ${myCar ? "py-2" : "py-4"}`}>
         <style>{"@keyframes pbblink{0%,100%{background:#ff1f1f;color:#fff}50%{background:#ffe600;color:#000}}"}</style>
         {fcyActive && (
@@ -4690,7 +4953,13 @@ export default function PitBoard() {
                 {liveInfo && liveInfo.relayAlive && liveInfo.status !== "FINISHED" && !liveInfo.feedFresh && (
                   <>🟠 Live : flux figé</>
                 )}
-                {liveInfo && liveInfo.relayAlive && liveInfo.status !== "FINISHED" && liveInfo.feedFresh && (
+                {liveInfo && liveInfo.relayAlive && liveInfo.status !== "FINISHED" && liveInfo.feedFresh && feedFrozen && (
+                  <>❄ Live : flux figé depuis {frozenFor} s</>
+                )}
+                {liveInfo && liveInfo.relayAlive && liveInfo.status !== "FINISHED" && liveInfo.feedFresh && feedPrep && (
+                  <>⏳ RIS en préparation : attente du vert</>
+                )}
+                {liveInfo && liveInfo.relayAlive && liveInfo.status !== "FINISHED" && liveInfo.feedFresh && !feedFrozen && !feedPrep && (
                   <>🟢 Live{settings.liveFlagAuto ? " · drapeaux auto" : ""}{liveInfo.trackStateRaw ? ` · ${liveInfo.trackStateRaw}` : ""} · {Math.max(0, Math.round((now - liveInfo.generatedAt) / 1000))} s</>
                 )}
               </div>
@@ -5354,6 +5623,19 @@ export default function PitBoard() {
 
         {/* GRILLE DE DÉPART */}
         <div className="mb-4">
+          {isAdmin && !myCar && (
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setAdmClOpen((o) => !o)}
+                className="rounded border border-white/40 bg-black/40 hover:bg-black/60 px-3 py-1.5 text-white text-xs font-black uppercase tracking-wide"
+                title="Classement de la course : une voiture, les voitures de la team ou toutes les voitures"
+              >
+                ☰ Classement {admClOpen ? "(ouvert)" : ""}
+              </button>
+              <span className="text-white/60 text-[11px]">S'ouvre seul quand toutes les voitures sont en piste sans annonce, se ferme seul dès qu'une annonce arrive.</span>
+            </div>
+          )}
           <h2 className={`text-white font-bold tracking-wide uppercase text-xs mb-2 items-center gap-2 ${myCar ? "hidden" : "flex"}`}>
             <Timer size={14} /> Grille des annonces ({carTiles.filter((t) => t.call).length} active
             {carTiles.filter((t) => t.call).length > 1 ? "s" : ""})
