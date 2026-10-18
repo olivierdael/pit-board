@@ -567,7 +567,11 @@ export function aroundOnTrack(cars, myNum, nowMs, store = paceStore, hist = lapS
       const r = k === 2 ? cp.ai - 3 : k === 1 ? cp.ai - 2 : cp.ai - 1; // point « ligne » qui sert de départ
       if (r >= 0 && myPts[r].k === 2 && !myPts[r].bad && !myPts[cp.ai].bad && !xPts[cp.bi].bad) {
         const xr = nearestSame(xPts, 2, myPts[r].t, 0.45 * myLap);
-        if (xr >= 0 && !xPts[xr].bad) {
+        // même nombre de points entre départ et point commun pour nous et pour X (sinon un tour manque dans l'historique : on ne compare pas),
+        // et durée plausible d'un seul tour pour chacune
+        const spanMe = myPts[cp.ai].t - myPts[r].t;
+        const spanX = xPts[cp.bi].t - xPts[xr].t;
+        if (xr >= 0 && !xPts[xr].bad && xr === cp.bi - (cp.ai - r) && spanMe <= 1.3 * myLap && spanX <= 1.3 * myLap * 1.3 && spanX >= 0) {
           const v = g0 - (xPts[xr].t - myPts[r].t);
           if (Math.abs(v) <= 40000) lapGainMs = v; // au-delà : tours non comparables
         }
