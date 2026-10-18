@@ -2264,7 +2264,50 @@ function DriversEditor({ cfg, currentN, drivenN, canEdit, onChange }) {
   );
 }
 
+// filet de sécurité global : si une partie de l'écran plante, on affiche l'erreur et on relance l'affichage seul au bout de 5 s
+// (les données sont rechargées depuis la base : rien n'est perdu) au lieu de laisser une page blanche
+class RootBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { err: null, n: 0 };
+    this.timer = null;
+  }
+  static getDerivedStateFromError(err) {
+    return { err };
+  }
+  componentDidCatch(err) {
+    console.error("PitBoard : erreur d'affichage", err);
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.setState((st) => ({ err: null, n: st.n + 1 })), 5000);
+  }
+  componentWillUnmount() {
+    clearTimeout(this.timer);
+  }
+  render() {
+    if (this.state.err) {
+      return (
+        <div style={{ background: "#171717", color: "#fff", minHeight: "100vh", padding: 16, fontFamily: "Arial,sans-serif" }}>
+          <div style={{ background: "#7f1d1d", border: "1px solid #f87171", borderRadius: 8, padding: 12 }}>
+            <b>Erreur d'affichage : {String((this.state.err && this.state.err.message) || this.state.err)}</b>
+            <div style={{ marginTop: 6 }}>L'affichage redémarre tout seul dans quelques secondes. Si l'erreur revient, envoie ce message.</div>
+            <button type="button" onClick={() => window.location.reload()} style={{ marginTop: 8, padding: "6px 12px", borderRadius: 6, background: "#fff", color: "#111", fontWeight: 700 }}>Recharger la page</button>
+          </div>
+        </div>
+      );
+    }
+    return <React.Fragment key={this.state.n}>{this.props.children}</React.Fragment>;
+  }
+}
+
 export default function PitBoard() {
+  return (
+    <RootBoundary>
+      <PitBoardApp />
+    </RootBoundary>
+  );
+}
+
+function PitBoardApp() {
   // code d'accès partagé (avant même le choix du rôle) : empêche qu'une personne tombe
   // sur le lien "par hasard" ou le partage sans réfléchir. Configuré via VITE_ACCESS_CODE
   // dans .env — pas une vraie sécurité (le code source reste lisible sur GitHub), mais
