@@ -3501,19 +3501,33 @@ function PitBoardApp() {
         const lc = live.cars[normalizeCarNumber(car.numero)];
         if (!lc) return;
         const call = callsRef.current.find((c) => c.carId === car.id);
+        // arrêt aux stands vu par RIS : suivi par voiture, avec ou sans annonce
+        const key = "free" + car.id;
+        const f = pitCount[key] || (pitCount[key] = { in: 0, out: 0, wasOut: false, said: false, open: false, inAt: 0 });
+        const inP = isPitIn(lc.state);
+        f.in = inP ? f.in + 1 : 0;
+        f.out = inP ? 0 : f.out + 1;
+        if (f.out >= 2) { f.wasOut = true; if (!call) f.said = false; }
+        const isRace = (settingsRef.current.eventType || "course") === "course";
         if (!call) {
-          // entrée aux stands NON annoncée : la voix prévient dès que RIS voit la voiture rentrer (course uniquement, une seule fois par passage)
-          const key = "free" + car.id;
-          const f = pitCount[key] || (pitCount[key] = { in: 0, out: 0, wasOut: false, said: false });
-          const inP = isPitIn(lc.state);
-          f.in = inP ? f.in + 1 : 0;
-          f.out = inP ? 0 : f.out + 1;
-          if (f.out >= 2) { f.wasOut = true; f.said = false; }
-          if ((settingsRef.current.eventType || "course") === "course" && f.in >= 2 && f.wasOut && !f.said) {
+          // entrée NON annoncée : la voix prévient, la fin du relais est notée et la ligne « litres ajoutés » est créée, comme pour un arrêt annoncé
+          if (isRace && f.in >= 2 && f.wasOut && !f.said) {
             f.said = true;
+            f.open = true;
+            f.inAt = nowMs;
             api.speakUnannounced(car.numero);
+            api.arrivalNoCall(car.id);
+          } else if (f.open && f.out >= 2) {
+            // RIS voit la voiture repartir : le chrono du relais suivant démarre, le temps au stand est noté
+            f.open = false;
+            api.exitNoCall(car.id, Math.max(0, Math.round((nowMs - f.inAt) / 1000)));
           }
           return;
+        }
+        if (f.open && f.out >= 2 && call.phase !== "instand") {
+          // arrêt non annoncé commencé avant l'annonce : la voiture est déjà repartie
+          f.open = false;
+          api.exitNoCall(car.id, Math.max(0, Math.round((nowMs - f.inAt) / 1000)));
         }
         const st = pitCount[call.id] || (pitCount[call.id] = { in: 0, out: 0, seen: false });
         const inPit = isPitIn(lc.state);
@@ -3521,7 +3535,8 @@ function PitBoardApp() {
         st.out = inPit ? 0 : st.out + 1;
         if (call.phase === "countdown") {
           if (st.in >= 1) {
-            api.forceArrival(call.id);
+            if (f.open) api.markInstand(call.id); // l'arrivée a déjà été notée (entrée non annoncée) : on ne la note pas deux fois
+            else api.forceArrival(call.id);
             api.speakEntry(call.numero);
             st.seen = true;
           }
@@ -3529,6 +3544,7 @@ function PitBoardApp() {
           if (inPit) st.seen = true;
           else if (st.seen && st.out >= 2) {
             delete pitCount[call.id];
+            f.open = false;
             api.removeCall(call.id);
           }
         }
@@ -4512,7 +4528,21 @@ function PitBoardApp() {
   // le relais live tourne dans une minuterie créée une seule fois : il doit toujours appeler
   // la version la plus récente de pushFlag (état `flag` et `calls` à jour)
   pushFlagRef.current = pushFlag;
-  autoPitRef.current = { forceArrival, removeCall, startRun, speakEntry: (num) => { if (soundOnRef.current) speakTrackPoint(audioCtxRef, num, "Entrée"); }, speakUnannounced: (num) => { if (soundOnRef.current) speakJob(() => playBeep(audioCtxRef), () => stationUtter(`Attention. La voiture numéro ${num} rentre aux stands. Entrée non annoncée.`), pickStationVoice); } };
+  // arrivée aux stands vue par RIS sans annonce : fin du relais + ligne « litres ajoutés » (seulement si la voiture roulait déjà)
+  function arrivalNoCall(carId) {
+    const st = stintsRef.current[carId];
+    if (!st || !st.lastExitAt) return;
+    logStintEnd(carId, false);
+    createTechRecord(carId);
+  }
+  function exitNoCall(carId, idleSec) {
+    logStintExit(carId, idleSec);
+  }
+  // annonce créée pendant que la voiture est déjà au stand (arrivée déjà notée) : on passe seulement l'annonce « au stand »
+  function markInstand(id) {
+    pushCalls(calls.map((c) => (c.id === id ? { ...c, phase: "instand", pitStartAt: Date.now() } : c)));
+  }
+  autoPitRef.current = { forceArrival, removeCall, startRun, arrivalNoCall, exitNoCall, markInstand, speakEntry: (num) => { if (soundOnRef.current) speakTrackPoint(audioCtxRef, num, "Entrée"); }, speakUnannounced: (num) => { if (soundOnRef.current) speakJob(() => playBeep(audioCtxRef), () => stationUtter(`Attention. La voiture numéro ${num} rentre aux stands. Entrée non annoncée.`), pickStationVoice); } };
 
   const theme = FLAGS[flag];
   const bgStyle =
@@ -5914,15 +5944,15 @@ function PitBoardApp() {
                                     <div className="flex flex-col gap-1.5">
                                       <span className="text-[11px] font-bold text-white/70">Sortie automatique (RIS) : détectée dès que la voiture repart</span>
                                       {/* échappatoire : la sortie n'a pas été détectée (arrêt long ou RIS en retard) */}
-                                      {d.pitElapsed >= 20 && !risBackOnTrack && (
+                                      {d.pitElapsed >= 30 && !risBackOnTrack && (
                                         <button
                                           onClick={() => canEdit && setConfirmExitId(call.id)}
                                           disabled={!canEdit}
                                           className="self-start flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-black disabled:opacity-40"
-                                          style={d.pitElapsed >= 150 ? { animation: "pbblink 1s infinite" } : { backgroundColor: "rgba(255,255,255,0.15)", color: "#fff", border: "1px solid rgba(255,255,255,0.35)" }}
-                                          title="RIS n'a pas encore signalé la sortie des stands : cliquer si la voiture est bien repartie"
+                                          style={d.pitElapsed >= 60 ? { animation: "pbblink 1s infinite" } : { backgroundColor: "rgba(255,255,255,0.15)", color: "#fff", border: "1px solid rgba(255,255,255,0.35)" }}
+                                          title="RIS n'a pas encore signalé la sortie des stands : cliquer si la voiture est bien sur la piste (le chrono du stand s'arrête et la saisie des litres arrive)"
                                         >
-                                          <CheckCircle2 size={16} /> La voiture est-elle sortie ?
+                                          <CheckCircle2 size={16} /> La voiture est-elle sur la piste ?
                                         </button>
                                       )}
                                     </div>
@@ -5936,7 +5966,7 @@ function PitBoardApp() {
                                         }}
                                         className="flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold text-white bg-red-600 hover:bg-red-500 transition-colors"
                                       >
-                                        <CheckCircle2 size={13} /> Oui, elle sort
+                                        <CheckCircle2 size={13} /> Oui, elle est sur la piste
                                       </button>
                                       <button
                                         onClick={() => setConfirmExitId(null)}
