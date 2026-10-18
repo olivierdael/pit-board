@@ -1358,11 +1358,41 @@ function WindowHost({ title, onClose, wide, storeKey, startPos, children }) {
     }
     setMsg("");
     w.document.title = "PitBoard · " + title;
-    w.document.head.innerHTML = '<meta charset="utf-8">';
-    document.querySelectorAll('link[rel="stylesheet"], style').forEach((n) => w.document.head.appendChild(n.cloneNode(true)));
+    w.document.head.innerHTML = '<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">';
+    // styles : adresse de base de l'application (sinon les liens relatifs d'une fenêtre vide ne chargent rien -> page blanche), règles copiées
+    // en texte (indépendantes du réseau et du moment du chargement) et liens absolus en renfort pour les feuilles illisibles
+    try {
+      const base = w.document.createElement("base");
+      base.href = document.baseURI;
+      w.document.head.appendChild(base);
+      let css = "";
+      Array.from(document.styleSheets).forEach((sh) => {
+        try {
+          Array.from(sh.cssRules).forEach((r) => {
+            css += r.cssText + "\n";
+          });
+        } catch {
+          /* feuille d'un autre site : on la charge par son lien */
+        }
+      });
+      if (css) {
+        const st = w.document.createElement("style");
+        st.textContent = css;
+        w.document.head.appendChild(st);
+      }
+      document.querySelectorAll('link[rel="stylesheet"]').forEach((n) => {
+        const l = w.document.createElement("link");
+        l.rel = "stylesheet";
+        l.href = n.href;
+        w.document.head.appendChild(l);
+      });
+    } catch {
+      /* au pire, le repli sombre ci-dessous reste lisible */
+    }
+    w.document.documentElement.style.background = "#171717";
     w.document.body.innerHTML = "";
     w.document.body.className = "bg-neutral-900";
-    w.document.body.style.margin = "0";
+    w.document.body.style.cssText = "margin:0;background:#171717;color:#fff;font-family:'Barlow Condensed','Arial Narrow',Helvetica,Arial,sans-serif";
     const root = w.document.createElement("div");
     w.document.body.appendChild(root);
     setPopup({ w, root });
@@ -5690,12 +5720,31 @@ export default function PitBoard() {
                     const nearEnd = d && d.phase === "countdown" && d.remaining <= 30 && d.remaining > 0;
                     const ringColor = overMax ? "#ff3b3b" : nearEnd ? "#ffd400" : "rgba(0,0,0,0.35)";
                     const autoCar = risOk && !!liveFor(car); // flux RIS en ligne pour cette voiture : entrée et sortie des stands automatiques
+                    const risLc = autoCar ? liveFor(car) : null;
+                    const risInPit = !!risLc && isPitIn(risLc.state); // RIS confirme : voiture aux stands -> plus de bouton « rentrée »
+                    const risBackOnTrack = !!risLc && !isPitIn(risLc.state) && risLc.s1 != null; // RIS fournit le premier S1 : voiture repartie -> plus de bouton « sortie »
                     const callControls = call ? (
                                 <>
                                   {d.phase === "countdown" ? (
                                     <>
                                       <div className="flex gap-1.5 flex-wrap">
-                                        {autoCar && <span className="text-[11px] font-bold text-white/70">Entrée automatique (RIS)</span>}
+                                        {autoCar && d.remaining > 30 && <span className="text-[11px] font-bold text-white/70">Entrée automatique (RIS)</span>}
+                                        {/* échappatoire : l'heure annoncée approche ou est passée et RIS n'a pas encore signalé l'entrée : le team manager peut la confirmer lui-même */}
+                                        {autoCar && d.remaining <= 30 && !risInPit && (
+                                          <button
+                                            onClick={() => {
+                                              if (!canEdit) return;
+                                              forceArrival(call.id);
+                                              if (soundOnRef.current) speakTrackPoint(audioCtxRef, call.numero, "Entrée");
+                                            }}
+                                            disabled={!canEdit}
+                                            className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-black disabled:opacity-40"
+                                            style={{ backgroundColor: car.couleur1, color: "#111" }}
+                                            title="RIS n'a pas encore signalé l'entrée aux stands : cliquer si la voiture est bien rentrée"
+                                          >
+                                            <PlayCircle size={16} /> Entrée manuelle
+                                          </button>
+                                        )}
                                         {!autoCar && <button
                                           onClick={() => {
                                             if (!canEdit) return;
@@ -5729,8 +5778,42 @@ export default function PitBoard() {
                                         ))}
                                       </div>
                                     </>
-                                  ) : autoCar ? (
-                                    <span className="text-[11px] font-bold text-white/70">Sortie automatique (RIS) : détectée dès que la voiture repart</span>
+                                  ) : autoCar && call.phase === "countdown" && risInPit ? (
+                                    <span className="text-[11px] font-bold text-white/70">RIS : voiture aux stands</span>
+                                  ) : autoCar && call.phase === "countdown" ? (
+                                    // l'heure annoncée est passée (l'appli affiche « au stand ») mais RIS n'a pas encore vu la voiture rentrer
+                                    <div className="flex flex-col gap-1.5">
+                                      <span className="text-[11px] font-bold text-white/70">Entrée non confirmée par RIS</span>
+                                      <button
+                                        onClick={() => {
+                                          if (!canEdit) return;
+                                          forceArrival(call.id);
+                                          if (soundOnRef.current) speakTrackPoint(audioCtxRef, call.numero, "Entrée");
+                                        }}
+                                        disabled={!canEdit}
+                                        className="self-start flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-black disabled:opacity-40"
+                                        style={{ animation: "pbblink 1s infinite" }}
+                                        title="L'heure annoncée est passée et RIS n'a pas vu la voiture rentrer : cliquer quand elle est bien rentrée (le chrono au stand repart de zéro)"
+                                      >
+                                        <PlayCircle size={16} /> La voiture est-elle rentrée ? Oui
+                                      </button>
+                                    </div>
+                                  ) : autoCar && confirmExitId !== call.id ? (
+                                    <div className="flex flex-col gap-1.5">
+                                      <span className="text-[11px] font-bold text-white/70">Sortie automatique (RIS) : détectée dès que la voiture repart</span>
+                                      {/* échappatoire : la sortie n'a pas été détectée (arrêt long ou RIS en retard) */}
+                                      {d.pitElapsed >= 20 && !risBackOnTrack && (
+                                        <button
+                                          onClick={() => canEdit && setConfirmExitId(call.id)}
+                                          disabled={!canEdit}
+                                          className="self-start flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-black disabled:opacity-40"
+                                          style={d.pitElapsed >= 150 ? { animation: "pbblink 1s infinite" } : { backgroundColor: "rgba(255,255,255,0.15)", color: "#fff", border: "1px solid rgba(255,255,255,0.35)" }}
+                                          title="RIS n'a pas encore signalé la sortie des stands : cliquer si la voiture est bien repartie"
+                                        >
+                                          <CheckCircle2 size={16} /> La voiture est-elle sortie ?
+                                        </button>
+                                      )}
+                                    </div>
                                   ) : confirmExitId === call.id ? (
                                     <div className="flex items-center gap-2">
                                       <span className="text-white text-xs font-bold">Confirmer ?</span>
