@@ -2551,6 +2551,7 @@ function PitBoardApp() {
   // dernier flux reçu via Supabase (écrit par le poste Admin relais) et état du relais local
   const [liveRow, setLiveRow] = useState(null); // { seq, generatedAt, fetchedAt, uuid, status, trackStateRaw, cars }
   const [relayStatus, setRelayStatus] = useState(null);
+  const finishFreezeRef = useRef(null); // { uuid, at } : instant où le flux RIS a annoncé la fin de course
   const liveRowRef = useRef(null); // dernière ligne live_timing reçue (lue par le relais pour savoir si le script Python est vivant)
   liveRowRef.current = liveRow;
   const scriptIngestRef = useRef(null);
@@ -3133,7 +3134,16 @@ function PitBoardApp() {
   // + retire une annonce si le stand dépasse la durée maximale au stand
   useEffect(() => {
     const t = setInterval(() => {
-      const nowMs = Date.now();
+      let nowMs = Date.now();
+      // fin de course dans le flux RIS (drapeau à damier) : tous les chronos se figent à cet instant
+      const lrF = liveRowRef.current;
+      const stF = settingsRef.current;
+      if (stF && stF.liveEnabled && lrF && lrF.status === "FINISHED" && (lrF.uuid || "") === (stF.liveUuid || "").trim()) {
+        if (!finishFreezeRef.current || finishFreezeRef.current.uuid !== lrF.uuid) finishFreezeRef.current = { uuid: lrF.uuid, at: nowMs };
+        nowMs = finishFreezeRef.current.at;
+      } else {
+        finishFreezeRef.current = null;
+      }
       setNow(nowMs);
 
       const toRemove = callsRef.current
