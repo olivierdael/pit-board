@@ -2108,6 +2108,26 @@ function DriverStrip({ ds, canEdit, onSet, hideTotals }) {
           )}
         </div>
       )}
+      {/* choix du pilote du relais : tant qu'il n'est pas confirmé (sortie des stands, automatique ou non), le nom clignote et chaque pilote se choisit d'un seul appui */}
+      {curDriver && !cur.confirmed && canEdit && !changing && choices.length > 0 && (
+        <div className="flex flex-col gap-1 rounded px-1.5 py-1" style={{ animation: "pbblink 1s infinite" }}>
+          <span className="font-black text-[11px]">Quel pilote conduit le relais {n} ?</span>
+          <div className="flex flex-wrap gap-1">
+            {choices.map((d) => (
+              <button
+                key={d.id}
+                type="button"
+                onClick={() => onSet(n, d.id)}
+                className="px-2.5 py-1 rounded font-black text-[11px] bg-black text-white border border-white/60"
+              >
+                {d.id === cur.id ? "✓ " : ""}
+                {driverName(d) || "Pilote sans nom"}
+                {d.id === prevId ? " (double relais)" : ""}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       {changing && (
         <div className="flex items-center gap-1.5">
           <select
@@ -4038,6 +4058,16 @@ function PitBoardApp() {
   // --- MOTEUR CARBURANT (estimation) ---
   // calibre la consommation d'une voiture à partir de ses relais terminés (temps vert/jaune)
   // et de l'essence réellement ajoutée à l'arrêt suivant (litres ajoutés, même index que le relais)
+  // litres saisis pour un arrêt : réponse donnée si la case contient un nombre (0 = « pas de litre ajouté »)
+  function techAnswered(rec) {
+    return !!rec && rec.fuelL !== "" && rec.fuelL != null && Number.isFinite(Number(rec.fuelL));
+  }
+  // le plein a-t-il été fait à cet arrêt ? Les litres saisis décident : > 0 = plein (le réservoir revient à sa capacité),
+  // 0 = pas de litre ajouté (on laisse tel quel : la consommation continue de s'accumuler). Sans saisie : choix de l'annonce.
+  function refuelOf(r, rec) {
+    return techAnswered(rec) ? Number(rec.fuelL) > 0 : !!(r && r.refueled);
+  }
+
   function computeCarFuelModel(carId) {
     const log = (stints[carId] && stints[carId].log) || [];
     const tech = techChecks[carId] || [];
@@ -4052,7 +4082,7 @@ function PitBoardApp() {
       runDistGreen += (r.vertSec / 3600) * settings.greenSpeedKmh;
       runDistYellow += (r.jauneSec / 3600) * settings.yellowSpeedKmh;
       runIdleSec += r.idleSec || 0;
-      if (r.refueled) {
+      if (refuelOf(r, tech[i])) {
         const rec = tech[i];
         const litres = rec ? Number(rec.fuelL) : NaN;
         if (!isNaN(litres) && litres > 0) {
@@ -4127,9 +4157,10 @@ function PitBoardApp() {
     // cumule les relais depuis le dernier vrai ravitaillement (fuel = Oui) : si un arrêt
     // précédent avait "Non" coché, sa consommation reste comptabilisée sans réinitialisation
     const log = st.log || [];
+    const techL = techChecks[carId] || [];
     let startIdx = 0;
     for (let i = log.length - 1; i >= 0; i--) {
-      if (log[i].refueled) {
+      if (refuelOf(log[i], techL[i])) {
         startIdx = i + 1;
         break;
       }
@@ -4191,9 +4222,10 @@ function PitBoardApp() {
   function computeEssaisRun(carId, nowMs) {
     const st = stints[carId];
     const log = (st && st.log) || [];
+    const techL = techChecks[carId] || [];
     let startIdx = 0;
     for (let i = log.length - 1; i >= 0; i--) {
-      if (log[i].refueled) {
+      if (refuelOf(log[i], techL[i])) {
         startIdx = i + 1;
         break;
       }
@@ -5946,7 +5978,9 @@ function PitBoardApp() {
                     const lastRecT = recsT[recsT.length - 1];
                     const stT = stints[car.id];
                     // litres ajoutés à saisir : la voiture a quitté les stands et la saisie n'est pas encore "envoyée"
-                    const techPending = !!(myCar && lastRecT && stT && stT.lastExitAt && stT.lastExitAt > lastRecT.ts && techAck[car.id] !== lastRecT.id);
+                    // (la voiture est repartie, la dernière ligne n'a pas de réponse : ni litres, ni « pas de litre ajouté », ni « envoyé »)
+                    const carOutT = !!(stT && stT.lastExitAt) && !(call && d && d.phase === "instand");
+                    const techPending = !!(myCar && lastRecT && carOutT && !techAnswered(lastRecT) && stT.lastExitAt > lastRecT.ts - 300000 && techAck[car.id] !== lastRecT.id);
                     return (
                       <div
                         key={car.id}
@@ -6100,6 +6134,28 @@ function PitBoardApp() {
                           {/* team manager : Entrée / points sur le circuit / quitte les stands, sans ouvrir la tuile */}
                           {myCar && !compact && callControls && (
                             <div className="flex flex-col gap-1.5 rounded bg-white/5 px-2 py-1.5">{callControls}</div>
+                          )}
+
+                          {/* litres ajoutés à saisir après la sortie des stands : bandeau clignotant, ou « pas de litre ajouté » en un appui */}
+                          {myCar && !compact && techPending && (
+                            <div className="flex flex-col gap-1.5 rounded px-2 py-1.5" style={{ animation: "pbblink 1s infinite" }}>
+                              <span className="font-black text-sm">⛽ Combien de litres ajoutés à l'arrêt ?</span>
+                              <div className="flex flex-wrap gap-1.5">
+                                <button type="button" onClick={() => setModal("tech")} className="px-3 py-1.5 rounded font-black text-sm bg-black text-white border border-white/60">
+                                  Saisir les litres
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    updateTechRecord(car.id, lastRecT.id, { fuelL: 0 });
+                                    ackTech(car.id, lastRecT.id);
+                                  }}
+                                  className="px-3 py-1.5 rounded font-black text-sm bg-black text-white border border-white/60"
+                                >
+                                  Pas de litre ajouté
+                                </button>
+                              </div>
+                            </div>
                           )}
 
                           {/* PILOTE DU RELAIS + temps de roulage cumulé (toujours visible, sauf en vue récap) */}
@@ -6783,6 +6839,18 @@ function PitBoardApp() {
                   <p className="text-white/40 text-[10px]">
                     {records.length} arrêts enregistrés pour cette voiture depuis le début de l'événement.
                   </p>
+                )}
+                {record && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      updateTechRecord(car.id, record.id, { fuelL: 0 });
+                      if (myCar) ackTech(car.id, record.id);
+                    }}
+                    className="self-start px-4 py-2 rounded font-black uppercase tracking-wide text-xs bg-white/15 text-white hover:bg-white/25"
+                  >
+                    Pas de litre ajouté (laisser tel quel)
+                  </button>
                 )}
                 {myCar && (
                   <button
