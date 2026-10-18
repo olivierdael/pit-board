@@ -28,7 +28,7 @@ import {
   lapBests,
   lapsToCsv,
 } from "./lib/drivers";
-import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, fcyFromRc, trackAlertRows, aroundOnTrack, pitOutCars, carLaps, classPositions, isPitIn, aroundWhyNot, pitExitInfo, saveLiveMemory, loadLiveMemory, setLiveTemperature, getLiveTemperature } from "./lib/liveView";
+import { fmtMs, fmtSec1, fmtGapMs, neighborsOf, clockNow, carNumbersIn, visibleRcMessages, updatePace, duelEstimates, duelEstimatesTrack, prioritizedDuels, fmtCountdown, fcyFromRc, trackAlertRows, aroundOnTrack, lastLapGain, pitOutCars, carLaps, classPositions, isPitIn, aroundWhyNot, pitExitInfo, saveLiveMemory, loadLiveMemory, setLiveTemperature, getLiveTemperature } from "./lib/liveView";
 import {
   Flag,
   Plus,
@@ -1131,7 +1131,7 @@ function AroundTable({ data, prio, alerts, myPos, myNum, myTeam, pilot, now, sta
       return { v, stale: false };
     }
     const x = h[id];
-    return x && now - x.t < 600000 ? { v: x.v, stale: true } : { v: null, stale: false };
+    return x && now - x.t < 120000 ? { v: x.v, stale: true } : { v: null, stale: false };
   };
   const hasCls = !!data && [...data.ahead, ...data.behind].some((r) => r.cat);
   const cols = { gridTemplateColumns: hasCls ? "2.6rem 3.2rem 4.2rem 2.6rem minmax(7rem,1fr) 6.2rem 8rem 4.6rem 9rem 11rem" : "2.6rem 3.2rem minmax(7rem,1fr) 6.2rem 8rem 4.6rem 9rem 11rem" };
@@ -1611,7 +1611,7 @@ function ClassementPanel({ cars, num, now, st, setSt, big, inWindow, onWindow, q
     const all = neighborsOf(cars, num, 115);
     const cls = classPositions(cars);
     const keep = (r) => !cat || ((cls[r.num] || {}).cat || "") === ((cls[num] || {}).cat || "");
-    const mkf = (r) => ({ num: r.num, pos: r.pos, pic: (cls[r.num] || {}).pic ?? null, gapMs: null, point: null, gainMs: null, lapGainMs: null });
+    const mkf = (r) => ({ num: r.num, pos: r.pos, pic: (cls[r.num] || {}).pic ?? null, gapMs: null, point: null, gainMs: null, lapGainMs: lastLapGain(num, r.num) });
     ahead = all ? all.above.filter(keep).slice(-st.nA).map(mkf) : [];
     behind = all ? all.below.filter(keep).slice(0, st.nB).map(mkf) : [];
   }

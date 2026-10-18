@@ -503,6 +503,20 @@ export function classPositions(cars) {
   return out;
 }
 
+// écart de temps au tour : notre dernier tour complet contre le tour de X qui s'est terminé le plus près du nôtre (même moment sur la piste)
+// > 0 : nous avons été plus rapides ; null si on ne peut pas comparer
+export function lastLapGain(myNum, xNum, hist = lapStore) {
+  const mh = hist[myNum] || [];
+  const a = mh[mh.length - 1];
+  const hs = hist[xNum] || [];
+  if (!a || !hs.length) return null;
+  let best = null;
+  for (const h of hs) if (best == null || Math.abs(h.end - a.end) < Math.abs(best.end - a.end)) best = h;
+  if (!best || Math.abs(best.end - a.end) > 0.6 * best.lt) return null;
+  const v = best.lt - a.lt;
+  return Math.abs(v) <= 40000 ? v : null;
+}
+
 // Les voitures autour de nous SUR LA PISTE, avec l'écart mesuré au dernier point commun (S1, S2 ou ligne).
 // renvoie { ahead: [...], behind: [...], me: { cat, pic }, ref: { point, at } (notre dernier point de chronométrage et son heure) } : ahead = jusqu'à nAhead voitures devant (la plus éloignée d'abord), behind = jusqu'à nBehind derrière (la plus proche d'abord).
 // ligne : { num, team, pos, cat (classe), pic (position dans la classe), gapMs (> 0 : derrière nous), point ("S1" | "S2" | "Ligne"), trendMs (variation de |écart| depuis le point précédent : < 0 = se rapproche, null si inconnu) }
@@ -576,6 +590,11 @@ export function aroundOnTrack(cars, myNum, nowMs, store = paceStore, hist = lapS
           if (Math.abs(v) <= 40000) lapGainMs = v; // au-delà : tours non comparables
         }
       }
+    }
+    // tour complet : on compare directement les temps au tour affichés (notre dernier tour contre le tour de X au même moment)
+    if (myPts[cp.ai].k === 2 && me.lapEnd != null && Math.abs(myPts[cp.ai].t - me.lapEnd) < 2000) {
+      const full = lastLapGain(myNum, num, hist);
+      if (full != null) lapGainMs = full;
     }
     rows.push({ ...base, gapMs: g0, point: ["S1", "S2", "Ligne"][myPts[cp.ai].k], trendMs, gainMs, lapGainMs });
   }
