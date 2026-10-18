@@ -4642,6 +4642,12 @@ export default function PitBoard() {
     if (call && call.phase === "instand") {
       const idleSec = call.pitStartAt ? Math.round((Date.now() - call.pitStartAt) / 1000) : 0;
       logStintExit(call.carId, idleSec);
+    } else if (call && call.phase === "countdown" && call.arrivalAt != null && call.arrivalAt <= Date.now()) {
+      // l'heure annoncée est passée : l'écran affichait « au stand » sans que l'entrée ait été validée (ni par RIS, ni par un bouton).
+      // La sortie vaut entrée : on note la fin du relais et on crée la ligne « litres ajoutés » comme pour une entrée normale.
+      logStintEnd(call.carId, call.fuel === "oui");
+      createTechRecord(call.carId);
+      logStintExit(call.carId, Math.max(0, Math.round((Date.now() - call.arrivalAt) / 1000)));
     }
   }
 
