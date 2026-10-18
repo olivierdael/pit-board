@@ -1333,6 +1333,24 @@ function FloatingPanel({ title, onClose, onPopout, wide, storeKey = "around", st
 }
 
 // Fenêtre flottante déplaçable, ou fenêtre séparée du navigateur (par exemple sur un autre écran) : contenu fourni par l'appelant
+// filet de sécurité : si un tableau plante, on affiche l'erreur dans la fenêtre au lieu de vider toute l'application
+class PanelBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { err: null };
+  }
+  static getDerivedStateFromError(err) {
+    return { err };
+  }
+  componentDidUpdate(prev) {
+    if (this.state.err && prev.stamp !== this.props.stamp && Math.floor(this.props.stamp / 5000) !== Math.floor(prev.stamp / 5000)) this.setState({ err: null }); // nouvel essai toutes les 5 s
+  }
+  render() {
+    if (this.state.err) return <div className="rounded bg-red-500/20 border border-red-400/60 px-2 py-1 text-red-200 font-sans text-xs">Ce tableau a rencontré une erreur ({String(this.state.err && this.state.err.message)}). Nouvel essai automatique dans quelques secondes.</div>;
+    return this.props.children;
+  }
+}
+
 function WindowHost({ title, onClose, wide, storeKey, startPos, children }) {
   const [popup, setPopup] = useState(null); // { w, root } quand la fenêtre séparée est ouverte
   const [msg, setMsg] = useState("");
@@ -1397,11 +1415,11 @@ function WindowHost({ title, onClose, wide, storeKey, startPos, children }) {
     w.document.body.appendChild(root);
     setPopup({ w, root });
   };
-  if (popup) return createPortal(<div className="bg-neutral-900 p-2 min-h-screen">{children}</div>, popup.root);
+  if (popup) return createPortal(<div className="bg-neutral-900 p-2 min-h-screen"><PanelBoundary stamp={Date.now()}>{children}</PanelBoundary></div>, popup.root);
   return (
     <FloatingPanel title={title} onClose={onClose} onPopout={openPopup} wide={wide} storeKey={storeKey} startPos={startPos}>
       {msg && <div className="rounded bg-red-500/20 border border-red-400/60 px-2 py-1 mb-1 text-red-200 font-sans text-xs">{msg}</div>}
-      {children}
+      <PanelBoundary stamp={Date.now()}>{children}</PanelBoundary>
     </FloatingPanel>
   );
 }
