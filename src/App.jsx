@@ -2727,9 +2727,16 @@ function PitBoardApp() {
       return new Set();
     }
   });
-  const ackRc = (k) =>
+  const ackRc = (k) => {
+    // « Vu » archive aussi le bandeau RC en direct portant le même texte
+    const msg = k.slice(k.indexOf("|") + 1);
+    rcMessages.filter((m) => m.message === msg).forEach((m) => dismissRc(m.key));
+    ackRcKeys([k]);
+  };
+  const ackRcKeys = (keys) =>
     setRcAcks((prev) => {
-      const n = new Set(prev).add(k);
+      const n = new Set(prev);
+      keys.forEach((k) => n.add(k));
       try {
         localStorage.setItem("pitboard_rcacks", JSON.stringify([...n].slice(-500)));
       } catch {
@@ -2936,8 +2943,58 @@ function PitBoardApp() {
   }
 
   // messages de la direction de course (RC) : généraux pour tous, ou filtrés sur nos numéros de voiture
-  const rcSeenRef = useRef({});
-  const [rcDismissed, setRcDismissed] = useState(() => new Set());
+  // « Vu » = archivé : les messages masqués et la date de première apparition de chaque message sont conservés dans CE navigateur
+  // (F5, nouveau déploiement ou redémarrage de l'affichage ne les font plus revenir ; ils restent consultables dans l'historique RC)
+  const RC_DISMISS_KEY = "pitboard_rcdismissed";
+  const RC_SEEN_KEY = "pitboard_rcseen";
+  const RC_KEEP_MS = 12 * 3600 * 1000;
+  const rcDismissTsRef = useRef(null);
+  if (rcDismissTsRef.current === null) {
+    let o = {};
+    try {
+      const v = JSON.parse(localStorage.getItem(RC_DISMISS_KEY) || "{}");
+      if (v && typeof v === "object" && !Array.isArray(v)) o = v;
+    } catch (e) {
+      o = {};
+    }
+    Object.keys(o).forEach((k) => {
+      if (typeof o[k] !== "number" || Date.now() - o[k] > RC_KEEP_MS) delete o[k];
+    });
+    rcDismissTsRef.current = o;
+  }
+  const rcSeenRef = useRef(null);
+  if (rcSeenRef.current === null) {
+    let o = {};
+    try {
+      const v = JSON.parse(localStorage.getItem(RC_SEEN_KEY) || "{}");
+      if (v && typeof v === "object" && !Array.isArray(v)) o = v;
+    } catch (e) {
+      o = {};
+    }
+    Object.keys(o).forEach((k) => {
+      if (typeof o[k] !== "number" || Date.now() - o[k] > RC_KEEP_MS) delete o[k];
+    });
+    rcSeenRef.current = o;
+  }
+  const [rcDismissed, setRcDismissed] = useState(() => new Set(Object.keys(rcDismissTsRef.current)));
+  function dismissRc(key) {
+    rcDismissTsRef.current[key] = Date.now();
+    try {
+      localStorage.setItem(RC_DISMISS_KEY, JSON.stringify(rcDismissTsRef.current));
+    } catch (e) {
+      /* stockage indisponible : le masquage reste valable jusqu'au rechargement */
+    }
+    try {
+      localStorage.setItem(RC_SEEN_KEY, JSON.stringify(rcSeenRef.current));
+    } catch (e) {
+      /* stockage indisponible */
+    }
+    setRcDismissed((prev) => new Set(prev).add(key));
+    // le « Vu » du bandeau fixe et de l'historique est validé en même temps
+    const msg = key.slice(key.indexOf("|") + 1);
+    ackRcKeys(rcLogAll.filter((l) => l.m === msg).map((l) => l.t + "|" + l.m));
+  }
+  const rcSavedAtRef = useRef(0);
   const rcMessages = useMemo(() => {
     if (!settings.liveEnabled || !liveInfo || !liveInfo.rc || liveInfo.rc.length === 0) return [];
     const wanted = (role === "manager" ? (myCar ? [myCar] : []) : allConfiguredCars).map((c) =>
@@ -2945,6 +3002,15 @@ function PitBoardApp() {
     );
     return visibleRcMessages(liveInfo.rc, wanted, now, rcSeenRef.current, rcDismissed, liveInfo.generatedAt);
   }, [settings.liveEnabled, liveInfo, role, myCar, allConfiguredCars, now, rcDismissed]);
+  useEffect(() => {
+    if (Date.now() - rcSavedAtRef.current < 5000) return;
+    rcSavedAtRef.current = Date.now();
+    try {
+      localStorage.setItem(RC_SEEN_KEY, JSON.stringify(rcSeenRef.current));
+    } catch (e) {
+      /* stockage indisponible */
+    }
+  }, [rcMessages]);
   // alerte "Full course yellow" annoncée par la direction de course (message RC) : écran jaune/noir qui clignote + annonce vocale,
   // même si le drapeau jaune n'a pas été activé à la main. Les messages déjà présents au chargement ne déclenchent rien.
   const rcAlertSeenRef = useRef(null);
@@ -4929,7 +4995,7 @@ function PitBoardApp() {
               <div className="text-white text-xl sm:text-2xl font-black leading-snug break-words">⚠ RC : {m.message}</div>
             </div>
             <button
-              onClick={() => setRcDismissed((prev) => new Set(prev).add(m.key))}
+              onClick={() => dismissRc(m.key)}
               className="text-white/80 hover:text-white flex-shrink-0"
               title="Masquer ce message"
             >
@@ -6040,7 +6106,7 @@ function PitBoardApp() {
                               <span>⚠ RC : {m.message}</span>
                               {myCar && (
                                 <button
-                                  onClick={() => setRcDismissed((prev) => new Set(prev).add(m.key))}
+                                  onClick={() => dismissRc(m.key)}
                                   className="text-white/80 hover:text-white flex-shrink-0"
                                   title="Masquer ce message"
                                 >
