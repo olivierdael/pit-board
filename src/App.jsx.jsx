@@ -2411,6 +2411,9 @@ export default function PitBoard() {
   // dernier flux reçu via Supabase (écrit par le poste Admin relais) et état du relais local
   const [liveRow, setLiveRow] = useState(null); // { seq, generatedAt, fetchedAt, uuid, status, trackStateRaw, cars }
   const [relayStatus, setRelayStatus] = useState(null);
+  const liveRowRef = useRef(null); // dernière ligne live_timing reçue (lue par le relais pour savoir si le script Python est vivant)
+  liveRowRef.current = liveRow;
+  const scriptIngestRef = useRef(null);
   const lastRawRef = useRef(null); // dernier flux brut reçu (poste Admin), pour l'échantillon de diagnostic
   const [sampleText, setSampleText] = useState(""); // seulement sur le poste Admin qui relaie
   const pushFlagRef = useRef(null);
@@ -3483,8 +3486,28 @@ export default function PitBoard() {
       if (!stopped) setRelayStatus({ ok: false, error: (e && e.message) || String(e), at: Date.now() });
     };
 
+    // un script Python (ris_relais.py) alimente déjà live_timing : le navigateur ne lit plus le flux (il n'est ni ralenti ni mis en pause),
+    // il se contente d'appliquer drapeaux, records et entrées/sorties de stand sur ce que le script écrit. Si le script s'arrête, le navigateur reprend seul.
+    const scriptAlive = () => {
+      const r = liveRowRef.current;
+      return !!(r && r.src === "script" && Date.now() - r.fetchedAt < 12000);
+    };
+    scriptIngestRef.current = (row) => {
+      if (stopped || !row || row.src !== "script" || Date.now() - row.fetchedAt >= 12000) return;
+      if (!pageMode && row.uuid !== uuid) return;
+      const nowMs = Date.now();
+      const live = { ...row, flag: normalizeTrackState(row.trackStateRaw) };
+      applyAutoFlag(live, nowMs);
+      try {
+        recordBests(live);
+        recordRc(live, nowMs);
+        autoPit(live, nowMs);
+      } catch (e) {}
+      setRelayStatus({ ok: true, error: "", via: "script", at: nowMs, generatedAt: live.generatedAt, nCars: Object.keys(live.cars).length, trackStateRaw: live.trackStateRaw, status: live.status });
+    };
+
     async function tick(quiet) {
-      if (busy || stopped) return;
+      if (busy || stopped || scriptAlive()) return;
       busy = true;
       try {
         const { raw, via } = await fetchLiveTiming(uuid);
@@ -3501,7 +3524,7 @@ export default function PitBoard() {
       // flux transmis par la page RIS (favori) : seuls les messages venant de RIS sont acceptés
       const onMessage = (event) => {
         const msg = readRisMessage(event);
-        if (!msg) return;
+        if (!msg || scriptAlive()) return;
         ingest(msg.raw, "page", msg.uuid || uuid).catch(showError);
       };
       let lastPageMsgAt = Date.now();
@@ -3525,6 +3548,7 @@ export default function PitBoard() {
       return () => {
         stopped = true;
         relayKickRef.current = null;
+        scriptIngestRef.current = null;
         clearInterval(fallback);
         window.removeEventListener("message", onPageMessage);
       };
@@ -3540,9 +3564,15 @@ export default function PitBoard() {
     return () => {
       stopped = true;
       relayKickRef.current = null;
+      scriptIngestRef.current = null;
       clearInterval(timer);
     };
   }, [isAdmin, settings.liveEnabled, settings.liveUuid, settings.liveSource]);
+
+  // données écrites par le script Python : appliquées dès leur arrivée (événement Realtime, pas de minuterie du navigateur)
+  useEffect(() => {
+    if (isAdmin && liveRow && liveRow.src === "script" && scriptIngestRef.current) scriptIngestRef.current(liveRow);
+  }, [liveRow, isAdmin]);
 
   // quand on (dés)active les drapeaux auto, on repart de zéro : plus de commande manuelle en attente
   useEffect(() => {
@@ -5364,7 +5394,9 @@ export default function PitBoard() {
                     {relayStatus && relayStatus.ok && (
                       <span className="text-green-400">
                         Relais OK (
-                        {relayStatus.via === "page"
+                        {relayStatus.via === "script"
+                          ? "via le script Python"
+                          : relayStatus.via === "page"
                           ? "via la page RIS"
                           : relayStatus.via === "proxy"
                           ? "via relais Vercel"
