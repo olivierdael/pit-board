@@ -3438,7 +3438,20 @@ export default function PitBoard() {
         const lc = live.cars[normalizeCarNumber(car.numero)];
         if (!lc) return;
         const call = callsRef.current.find((c) => c.carId === car.id);
-        if (!call) return;
+        if (!call) {
+          // entrée aux stands NON annoncée : la voix prévient dès que RIS voit la voiture rentrer (course uniquement, une seule fois par passage)
+          const key = "free" + car.id;
+          const f = pitCount[key] || (pitCount[key] = { in: 0, out: 0, wasOut: false, said: false });
+          const inP = isPitIn(lc.state);
+          f.in = inP ? f.in + 1 : 0;
+          f.out = inP ? 0 : f.out + 1;
+          if (f.out >= 2) { f.wasOut = true; f.said = false; }
+          if ((settingsRef.current.eventType || "course") === "course" && f.in >= 2 && f.wasOut && !f.said) {
+            f.said = true;
+            api.speakUnannounced(car.numero);
+          }
+          return;
+        }
         const st = pitCount[call.id] || (pitCount[call.id] = { in: 0, out: 0, seen: false });
         const inPit = isPitIn(lc.state);
         st.in = inPit ? st.in + 1 : 0;
@@ -4424,7 +4437,7 @@ export default function PitBoard() {
   // le relais live tourne dans une minuterie créée une seule fois : il doit toujours appeler
   // la version la plus récente de pushFlag (état `flag` et `calls` à jour)
   pushFlagRef.current = pushFlag;
-  autoPitRef.current = { forceArrival, removeCall, startRun, speakEntry: (num) => { if (soundOnRef.current) speakTrackPoint(audioCtxRef, num, "Entrée"); } };
+  autoPitRef.current = { forceArrival, removeCall, startRun, speakEntry: (num) => { if (soundOnRef.current) speakTrackPoint(audioCtxRef, num, "Entrée"); }, speakUnannounced: (num) => { if (soundOnRef.current) speakJob(() => playBeep(audioCtxRef), () => stationUtter(`Attention. La voiture numéro ${num} rentre aux stands. Entrée non annoncée.`), pickStationVoice); } };
 
   const theme = FLAGS[flag];
   const bgStyle =
