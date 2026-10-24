@@ -10,33 +10,51 @@
 
 const DIRECT_URL = (uuid) => `https://live.ris-timing.be/api/live-timing?uuid=${encodeURIComponent(uuid)}`;
 const PROXY_URL = (uuid) => `/api/live-timing?uuid=${encodeURIComponent(uuid)}`;
+// proxy local de l'équipe (ris_proxy.py sur le PC Admin) : même format que RIS, adresse modifiable
+// avec localStorage "pitboard_ris_local" (ex. http://localhost:8787)
+function localBase() {
+  try {
+    const v = localStorage.getItem("pitboard_ris_local");
+    if (v && /^https?:\/\/[^/\s]+$/.test(v.trim())) return v.trim();
+  } catch (e) {
+    /* stockage indisponible */
+  }
+  return "http://localhost:8787";
+}
+const LOCAL_URL = (uuid) => `${localBase()}/api/live-timing?uuid=${encodeURIComponent(uuid)}&t=${Date.now()}`;
 
-let preferProxy = false; // mémorise le mode qui a fonctionné en dernier
+let lastMode = "direct"; // mémorise le mode qui a fonctionné en dernier
 
-async function fetchWithTimeout(url, ms) {
+async function fetchWithTimeout(url, ms, simple) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), ms);
   try {
+    // requête « simple » (sans en-tête ni option de cache) pour le proxy local : pas de pré-vérification CORS
+    if (simple) return await fetch(url, { signal: ctrl.signal });
     return await fetch(url, { signal: ctrl.signal, cache: "no-store", headers: { Accept: "application/json" } });
   } finally {
     clearTimeout(timer);
   }
 }
 
-// retourne { raw, via: "direct" | "proxy" } ou lève une erreur qui explique les deux échecs
+// retourne { raw, via: "direct" | "proxy" | "local" } ou lève une erreur qui explique les échecs
+// ordre : d'abord le dernier mode qui a fonctionné, puis les autres (lecture directe, relais Vercel, proxy local)
 export async function fetchLiveTiming(uuid) {
   const errors = [];
-  const order = preferProxy ? ["proxy", "direct"] : ["direct", "proxy"];
+  const all = ["direct", "proxy", "local"];
+  const order = [lastMode, ...all.filter((m) => m !== lastMode)];
+  const label = { direct: "lecture directe", proxy: "relais Vercel", local: "proxy local" };
   for (const mode of order) {
     try {
-      const res = await fetchWithTimeout(mode === "direct" ? DIRECT_URL(uuid) : PROXY_URL(uuid), 8000);
+      const url = mode === "direct" ? DIRECT_URL(uuid) : mode === "proxy" ? PROXY_URL(uuid) : LOCAL_URL(uuid);
+      const res = await fetchWithTimeout(url, mode === "local" ? 4000 : 8000, mode === "local");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const raw = await res.json();
-      preferProxy = mode === "proxy";
+      lastMode = mode;
       return { raw, via: mode };
     } catch (e) {
       const msg = e && e.name === "AbortError" ? "délai dépassé" : (e && e.message) || String(e);
-      errors.push(`${mode === "direct" ? "lecture directe" : "relais Vercel"} : ${msg}`);
+      errors.push(`${label[mode]} : ${msg}`);
     }
   }
   throw new Error(errors.join(" | "));
